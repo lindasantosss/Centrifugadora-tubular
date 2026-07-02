@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>Simulador AR — Centrífuga Tubular · Sílice en Agua</title>
+<title>Simulador AR — Centrífuga Tubular Industrial</title>
 
 <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
 <script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
@@ -67,121 +67,158 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.casingRatio = 0.46;         
     this.silicaParticles = [];
     this.waterParticles = [];
-    this.outflowParticles = []; 
+    this.lightOutflowParticles = []; 
+    this.heavyOutflowParticles = []; 
     this.inflowParticles = []; 
     this.settledCount = 0;
+    
     this.numSilica = 26;
     this.numWater = 15;
-    this.numOutflow = 12; 
-    this.numInflow = 8; 
+    this.numOutflow = 16; 
+    this.numInflow = 22; // Más densidad de flujo de entrada
 
     this.structuralBody = document.createElement('a-entity');
     const H = this.tubeHalfHeight;
+    const casingR = this.baseR * this.casingRatio;
+    const tubeR = this.baseR * this.tubeRatio;
 
+    // ---- ESTILIZACIÓN DE LA BASE INFERIOR ----
     const base = document.createElement('a-cylinder');
-    base.setAttribute('radius', 0.085);
-    base.setAttribute('height', 0.045);
-    base.setAttribute('position', `0 ${-H - 0.05} 0`);
-    base.setAttribute('material', 'color:#2c2e31; metalness:0.7; roughness:0.35');
+    base.setAttribute('radius', 0.11);
+    base.setAttribute('height', 0.04);
+    base.setAttribute('position', `0 ${-H - 0.02} 0`);
+    base.setAttribute('material', 'color:#111215; metalness:0.9; roughness:0.2');
     this.structuralBody.appendChild(base);
 
-    const foot = document.createElement('a-cylinder');
-    foot.setAttribute('radius', 0.055);
-    foot.setAttribute('height', 0.035);
-    foot.setAttribute('position', `0 ${-H - 0.02} 0`);
-    foot.setAttribute('material', 'color:#3d4045; metalness:0.75; roughness:0.3');
-    this.structuralBody.appendChild(foot);
+    // Maxitubo acrílico inferior transparente pulido
+    const feedPipe = document.createElement('a-cylinder');
+    feedPipe.setAttribute('radius', 0.03); 
+    feedPipe.setAttribute('height', 0.35);  
+    feedPipe.setAttribute('position', `0 ${-H - 0.195} 0`); 
+    feedPipe.setAttribute('material', 'color:#aed8f2; opacity:0.18; transparent:true; shader:standard; metalness:0.95; roughness:0.05; side:double');
+    this.structuralBody.appendChild(feedPipe);
 
-    const casingR = this.baseR * this.casingRatio;
+    this.inflowSourceY = -H - 0.35;
+
+    // ---- CUERPO PRINCIPAL (ROTOR / BOWL) ----
     this.casing = document.createElement('a-cylinder');
     this.casing.setAttribute('radius', casingR);
     this.casing.setAttribute('height', H * 2);
     this.casing.setAttribute('open-ended', 'true');
-    this.casing.setAttribute('segments-radial', 20);
-    this.casing.setAttribute('material', 'color:#aab4b8; opacity:0.25; shader:standard; metalness:0.5; roughness:0.4; side:double; transparent:true');
+    this.casing.setAttribute('segments-radial', 24);
+    this.casing.setAttribute('material', 'color:#ffffff; opacity:0.15; shader:standard; metalness:0.8; roughness:0.2; side:double; transparent:true');
     this.structuralBody.appendChild(this.casing);
 
-    this.ribsGroup = document.createElement('a-entity');
-    for (let i = 0; i < 6; i++) {
-      const ang = (i / 6) * Math.PI * 2;
-      const rib = document.createElement('a-box');
-      rib.setAttribute('width', 0.004);
-      rib.setAttribute('height', H * 2 * 0.94);
-      rib.setAttribute('depth', 0.004);
-      rib.setAttribute('position', `${casingR * Math.cos(ang)} 0 ${casingR * Math.sin(ang)}`);
-      rib.setAttribute('material', 'color:#7d878b; metalness:0.6; roughness:0.4; transparent:true; opacity:0.7');
-      this.ribsGroup.appendChild(rib);
-    }
-    this.structuralBody.appendChild(this.ribsGroup);
-
-    this.dome = document.createElement('a-sphere');
-    this.dome.setAttribute('radius', casingR);
-    this.dome.setAttribute('theta-length', 95);
-    this.dome.setAttribute('position', `0 ${H + 0.01} 0`);
-    this.dome.setAttribute('material', 'color:#c7cdd1; metalness:0.75; roughness:0.25; transparent:true; opacity:0.9');
-    this.structuralBody.appendChild(this.dome);
-
-    const tubeR = this.baseR * this.tubeRatio;
     this.tube = document.createElement('a-cylinder');
     this.tube.setAttribute('radius', tubeR);
-    this.tube.setAttribute('height', H * 1.9);
+    this.tube.setAttribute('height', H * 1.95);
     this.tube.setAttribute('open-ended', 'true');
-    this.tube.setAttribute('segments-radial', 24);
     this.tube.setAttribute('material', 'color:#5ec8c2; opacity:0.12; shader:flat; side:double; transparent:true');
     this.structuralBody.appendChild(this.tube);
 
-    this.ringsGroup = document.createElement('a-entity');
-    ['top','bottom'].forEach(pos=>{
-      const ring = document.createElement('a-torus');
-      ring.setAttribute('radius', tubeR);
-      ring.setAttribute('radius-tubular', 0.003);
-      ring.setAttribute('rotation', '90 0 0');
-      ring.setAttribute('position', `0 ${pos==='top'? H*0.95 : -H*0.95} 0`);
-      ring.setAttribute('material', 'color:#dff0f0; metalness:0.7; roughness:0.2; emissive:#5ec8c2; emissiveIntensity:0.15');
-      this.ringsGroup.appendChild(ring);
-    });
-    this.structuralBody.appendChild(this.ringsGroup);
-
-    const feedPipe = document.createElement('a-cylinder');
-    feedPipe.setAttribute('radius', 0.01);
-    feedPipe.setAttribute('height', 0.12);
-    feedPipe.setAttribute('position', `0 ${-H - 0.11} 0`); 
-    feedPipe.setAttribute('material', 'color:#9aa0a6; metalness:0.8; roughness:0.3');
-    this.structuralBody.appendChild(feedPipe);
-
-    this.inflowSourceY = -H - 0.17;
-
-    this.lightPipe = document.createElement('a-cylinder');
-    this.lightPipe.setAttribute('radius', 0.006);
-    this.lightPipe.setAttribute('height', 0.12);
-    this.lightPipe.setAttribute('rotation', '0 0 -52');
-    this.lightPipe.setAttribute('position', `${-casingR - 0.02} ${H + 0.05} 0`);
-    this.lightPipe.setAttribute('material', 'color:#5ec8c2; metalness:0.6; roughness:0.4');
-    this.structuralBody.appendChild(this.lightPipe);
-
-    this.outflowSource = new AFRAME.THREE.Vector3(-casingR - 0.02, H + 0.05, 0);
-
-    this.heavyPipe = document.createElement('a-cylinder');
-    this.heavyPipe.setAttribute('radius', 0.006);
-    this.heavyPipe.setAttribute('height', 0.12);
-    this.heavyPipe.setAttribute('rotation', '0 0 52');
-    this.heavyPipe.setAttribute('position', `${casingR + 0.02} ${H + 0.05} 0`);
-    this.heavyPipe.setAttribute('material', 'color:#2f7d5c; metalness:0.6; roughness:0.4');
-    this.structuralBody.appendChild(this.heavyPipe);
-
+    // Eje Central Cromado
     this.axis = document.createElement('a-cylinder');
-    this.axis.setAttribute('radius', 0.0035);
-    this.axis.setAttribute('height', H * 2 + 0.03);
-    this.axis.setAttribute('material', 'color:#f2c14e; shader:flat');
+    this.axis.setAttribute('radius', 0.006);
+    this.axis.setAttribute('height', H * 2 + 0.28);
+    this.axis.setAttribute('position', '0 0.08 0');
+    this.axis.setAttribute('material', 'color:#ffffff; metalness:1.0; roughness:0.05');
     this.structuralBody.appendChild(this.axis);
 
+    // ---- REDISEÑO ESTÉTICO SUPERIOR (IMPRESIONANTE) ----
+    
+    // Plato Colector Superior (Heavy Phase Volute)
+    const heavyCollector = document.createElement('a-cylinder');
+    heavyCollector.setAttribute('radius', casingR + 0.01);
+    heavyCollector.setAttribute('height', 0.04);
+    heavyCollector.setAttribute('position', `0 ${H + 0.02} 0`);
+    heavyCollector.setAttribute('material', 'color:#2a2d32; metalness:0.9; roughness:0.1');
+    this.structuralBody.appendChild(heavyCollector);
+
+    // Plato Colector Superior (Light Phase Volute)
+    const lightCollector = document.createElement('a-cylinder');
+    lightCollector.setAttribute('radius', tubeR + 0.02);
+    lightCollector.setAttribute('height', 0.03);
+    lightCollector.setAttribute('position', `0 ${H + 0.05} 0`);
+    lightCollector.setAttribute('material', 'color:#3a3f44; metalness:0.9; roughness:0.1');
+    this.structuralBody.appendChild(lightCollector);
+
+    // Cubierta Estilizada del Motor Eléctrico
+    this.motorGroup = document.createElement('a-entity');
+    this.motorGroup.setAttribute('position', `0 ${H + 0.16} 0`);
+    
+    const motorCasing = document.createElement('a-cylinder');
+    motorCasing.setAttribute('radius', 0.05);
+    motorCasing.setAttribute('height', 0.09);
+    motorCasing.setAttribute('rotation', '0 0 90'); 
+    motorCasing.setAttribute('position', '0.06 0 0');
+    motorCasing.setAttribute('material', 'color:#22252a; metalness:0.8; roughness:0.3');
+    this.motorGroup.appendChild(motorCasing);
+
+    // Aletas de ventilación del motor (Detalle de ingeniería)
+    const coolingFins = document.createElement('a-box');
+    coolingFins.setAttribute('width', 0.02);
+    coolingFins.setAttribute('height', 0.07);
+    coolingFins.setAttribute('depth', 0.07);
+    coolingFins.setAttribute('position', '0.11 0 0');
+    coolingFins.setAttribute('material', 'color:#111215; metalness:0.7; roughness:0.4');
+    this.motorGroup.appendChild(coolingFins);
+
+    const motorCap = document.createElement('a-cylinder');
+    motorCap.setAttribute('radius', 0.038);
+    motorCap.setAttribute('height', 0.03);
+    motorCap.setAttribute('position', '0 -0.01 0');
+    motorCap.setAttribute('material', 'color:#ffffff; metalness:0.95; roughness:0.05');
+    this.motorGroup.appendChild(motorCap);
+    this.structuralBody.appendChild(this.motorGroup);
+
+    // ---- TUBERÍAS DE CRISTAL INDUSTRIAL (TRANSPARENTES) ----
+    const premiumGlass = 'color:#d0ebff; opacity:0.25; transparent:true; shader:standard; metalness:0.98; roughness:0.02; side:double';
+    
+    // Derecha: Ducto de Agua Ligera
+    const lightPipeH = document.createElement('a-cylinder');
+    lightPipeH.setAttribute('radius', 0.014);
+    lightPipeH.setAttribute('height', 0.08);
+    lightPipeH.setAttribute('rotation', '0 0 90');
+    lightPipeH.setAttribute('position', `${tubeR + 0.04} ${H + 0.05} 0`);
+    lightPipeH.setAttribute('material', premiumGlass);
+    this.structuralBody.appendChild(lightPipeH);
+
+    const lightPipeV = document.createElement('a-cylinder');
+    lightPipeV.setAttribute('radius', 0.014);
+    lightPipeV.setAttribute('height', 0.28);
+    lightPipeV.setAttribute('position', `${tubeR + 0.08} ${H - 0.07} 0`);
+    lightPipeV.setAttribute('material', premiumGlass);
+    this.structuralBody.appendChild(lightPipeV);
+    
+    this.lightOutflowSource = new AFRAME.THREE.Vector3(tubeR + 0.08, H + 0.05, 0);
+
+    // Izquierda: Ducto de Sílice Pesada
+    const heavyPipeH = document.createElement('a-cylinder');
+    heavyPipeH.setAttribute('radius', 0.015);
+    heavyPipeH.setAttribute('height', 0.08);
+    heavyPipeH.setAttribute('rotation', '0 0 90');
+    heavyPipeH.setAttribute('position', `${-casingR - 0.04} ${H + 0.02} 0`);
+    heavyPipeH.setAttribute('material', premiumGlass);
+    this.structuralBody.appendChild(heavyPipeH);
+
+    const heavyPipeV = document.createElement('a-cylinder');
+    heavyPipeV.setAttribute('radius', 0.015);
+    heavyPipeV.setAttribute('height', 0.28);
+    heavyPipeV.setAttribute('position', `${-casingR - 0.08} ${H - 0.10} 0`);
+    heavyPipeV.setAttribute('material', premiumGlass);
+    this.structuralBody.appendChild(heavyPipeV);
+
+    this.heavyOutflowSource = new AFRAME.THREE.Vector3(-casingR - 0.08, H + 0.02, 0);
+
+    // Sólidos retenidos (Torta)
     this.cake = document.createElement('a-torus');
     this.cake.setAttribute('radius', tubeR * 0.95);
-    this.cake.setAttribute('radius-tubular', 0.008);
+    this.cake.setAttribute('radius-tubular', 0.009);
     this.cake.setAttribute('rotation', '90 0 0');
     this.cake.setAttribute('material', 'color:#e4572e; opacity:0.12; shader:flat; transparent:true');
     this.structuralBody.appendChild(this.cake);
 
+    // ---- SISTEMAS DE PARTÍCULAS DINÁMICAS ----
     this.spinGroup = document.createElement('a-entity');
     this.structuralBody.appendChild(this.spinGroup);
 
@@ -191,39 +228,48 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.inflowGroup = document.createElement('a-entity');
     this.structuralBody.appendChild(this.inflowGroup);
 
+    // Inicialización de fluidos internos
     for (let i = 0; i < this.numSilica; i++) {
       const sphere = document.createElement('a-sphere');
       sphere.setAttribute('radius', 0.0075);
-      sphere.setAttribute('material', 'color:#f2c14e; shader:flat; emissive:#f2c14e; emissiveIntensity:0.4');
+      sphere.setAttribute('material', 'color:#f2c14e; shader:flat; emissive:#f2c14e; emissiveIntensity:0.3');
       this.spinGroup.appendChild(sphere);
       this.silicaParticles.push(this.makeSilicaParticle(sphere, true));
     }
     
     for (let i = 0; i < this.numWater; i++) {
       const sphere = document.createElement('a-sphere');
-      sphere.setAttribute('radius', 0.005);
+      sphere.setAttribute('radius', 0.0055);
       sphere.setAttribute('material', 'color:#5ec8c2; shader:flat; opacity:0.75; transparent:true');
       this.spinGroup.appendChild(sphere);
       this.waterParticles.push({
         el: sphere,
-        rRatio: 0.15 + Math.random() * 0.55, 
+        rRatio: 0.12 + Math.random() * 0.58, 
         theta: Math.random() * Math.PI * 2,
         h: (Math.random() - 0.5) * H * 1.7
       });
     }
 
+    // Descarga confinada
     for (let i = 0; i < this.numOutflow; i++) {
-      const sphere = document.createElement('a-sphere');
-      sphere.setAttribute('radius', 0.0045);
-      sphere.setAttribute('material', 'color:#5ec8c2; shader:flat; opacity:0.85; transparent:true');
-      this.outflowGroup.appendChild(sphere);
-      this.outflowParticles.push(this.makeOutflowParticle(sphere, true));
+      const spL = document.createElement('a-sphere');
+      spL.setAttribute('radius', 0.005);
+      spL.setAttribute('material', 'color:#5ec8c2; shader:flat');
+      this.outflowGroup.appendChild(spL);
+      this.lightOutflowParticles.push(this.makeOutflowParticle(spL, true, 'light'));
+
+      const spH = document.createElement('a-sphere');
+      spH.setAttribute('radius', 0.0055);
+      spH.setAttribute('material', 'color:#2f7d5c; shader:flat');
+      this.outflowGroup.appendChild(spH);
+      this.heavyOutflowParticles.push(this.makeOutflowParticle(spH, true, 'heavy'));
     }
 
+    // ---- OPTIMIZACIÓN: ALIMENTACIÓN ALTAMENTE VISIBLE ----
     for (let i = 0; i < this.numInflow; i++) {
       const sphere = document.createElement('a-sphere');
-      sphere.setAttribute('radius', 0.005);
-      sphere.setAttribute('material', 'color:#d1af54; shader:flat; opacity:0.8; transparent:true');
+      sphere.setAttribute('radius', 0.014); // Partículas grandes e impactantes
+      sphere.setAttribute('material', 'color:#f7cb63; shader:flat; emissive:#e0a41b; emissiveIntensity:0.5; transparent:false');
       this.inflowGroup.appendChild(sphere);
       this.inflowParticles.push(this.makeInflowParticle(sphere, true));
     }
@@ -235,7 +281,7 @@ AFRAME.registerComponent('centrifuge-sim', {
   makeSilicaParticle: function (el, randomizePhase) {
     return {
       el,
-      r0Ratio: 0.04 + Math.random() * 0.10, 
+      r0Ratio: 0.05 + Math.random() * 0.12, 
       theta: Math.random() * Math.PI * 2,
       h: (Math.random() - 0.5) * this.tubeHalfHeight * 1.7,
       elapsed: randomizePhase ? Math.random() * 1.6 : 0,
@@ -244,32 +290,29 @@ AFRAME.registerComponent('centrifuge-sim', {
     };
   },
 
-  makeOutflowParticle: function(el, randomize) {
-    const angleRad = -52 * Math.PI / 180;
-    const speed = 0.18 + Math.random() * 0.12;
+  makeOutflowParticle: function(el, randomize, type) {
+    const isLight = type === 'light';
+    const source = isLight ? this.lightOutflowSource : this.heavyOutflowSource;
     return {
       el,
-      x0: this.outflowSource.x,
-      y0: this.outflowSource.y + 0.05, 
-      z0: this.outflowSource.z,
-      vx: Math.sin(angleRad) * speed,
-      vy: Math.cos(angleRad) * speed,
-      vz: (Math.random() - 0.5) * 0.04,
-      age: randomize ? Math.random() * 1.2 : 0,
-      maxAge: 1.0 + Math.random() * 0.5
+      x0: source.x,
+      y0: source.y,
+      z0: source.z,
+      vy: -0.25 - Math.random() * 0.15, 
+      age: randomize ? Math.random() * 1.1 : 0,
+      maxAge: 1.0
     };
   },
 
   makeInflowParticle: function(el, randomize) {
-    const speedY = 0.22 + Math.random() * 0.1; 
     return {
       el,
-      x: (Math.random() - 0.5) * 0.01,
+      x: (Math.random() - 0.5) * 0.02, // Distribución fluida dentro del gran tubo
       y0: this.inflowSourceY,
-      z: (Math.random() - 0.5) * 0.01,
-      vy: speedY,
-      age: randomize ? Math.random() * 0.8 : 0,
-      maxAge: 0.75 
+      z: (Math.random() - 0.5) * 0.02,
+      vy: 0.28 + Math.random() * 0.08, 
+      age: randomize ? Math.random() * 1.2 : 0,
+      maxAge: 1.2
     };
   },
 
@@ -280,12 +323,9 @@ AFRAME.registerComponent('centrifuge-sim', {
       Object.assign(p, this.makeSilicaParticle(p.el, false));
       p.el.setAttribute('material', 'color', '#f2c14e');
     });
-    this.outflowParticles.forEach(p => {
-      Object.assign(p, this.makeOutflowParticle(p.el, false));
-    });
-    this.inflowParticles.forEach(p => {
-      Object.assign(p, this.makeInflowParticle(p.el, false));
-    });
+    this.lightOutflowParticles.forEach(p => Object.assign(p, this.makeOutflowParticle(p.el, false, 'light')));
+    this.heavyOutflowParticles.forEach(p => Object.assign(p, this.makeOutflowParticle(p.el, false, 'heavy')));
+    this.inflowParticles.forEach(p => Object.assign(p, this.makeInflowParticle(p.el, false)));
   },
 
   tick: function (time, delta) {
@@ -296,8 +336,6 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.structuralBody.object3D.scale.set(scaleFactor, 1, scaleFactor);
     
     const tR = this._baseTubeR; 
-    const casingR = this.baseR * this.casingRatio;
-    this.outflowSource.x = -casingR - 0.02;
 
     if (SIM.paused) return;
 
@@ -319,7 +357,7 @@ AFRAME.registerComponent('centrifuge-sim', {
           part.settled = true;
           part.settleTimer = 0;
           this.settledCount++;
-          part.el.setAttribute('material', 'color', '#e4572e');
+          part.el.setAttribute('material', 'color', '#e4572e'); 
           const cakeOpacity = Math.min(0.7, 0.12 + this.settledCount * 0.05);
           this.cake.setAttribute('material', 'opacity', cakeOpacity);
         }
@@ -337,31 +375,35 @@ AFRAME.registerComponent('centrifuge-sim', {
       w.el.object3D.position.set(x, w.h, z);
     });
 
-    this.outflowParticles.forEach(outP => {
+    this.lightOutflowParticles.forEach(outP => {
       outP.age += dt;
       if (outP.age >= outP.maxAge) {
-        Object.assign(outP, this.makeOutflowParticle(outP.el, false));
+        Object.assign(outP, this.makeOutflowParticle(outP.el, false, 'light'));
       } else {
-        const currentX = outP.x0 + outP.vx * outP.age;
-        const currentY = outP.y0 + outP.vy * outP.age - (0.15 * outP.age * outP.age); 
-        const currentZ = outP.z0 + outP.vz * outP.age;
-        outP.el.object3D.position.set(currentX, currentY, currentZ);
-        
-        const alpha = Math.max(0, 0.85 * (1 - (outP.age / outP.maxAge)));
-        outP.el.setAttribute('material', 'opacity', alpha);
+        outP.el.object3D.position.x = outP.x0;
+        outP.el.object3D.position.y = outP.y0 + outP.vy * outP.age;
+        outP.el.object3D.position.z = outP.z0;
+      }
+    });
+
+    this.heavyOutflowParticles.forEach(outP => {
+      outP.age += dt;
+      if (outP.age >= outP.maxAge) {
+        Object.assign(outP, this.makeOutflowParticle(outP.el, false, 'heavy'));
+      } else {
+        outP.el.object3D.position.x = outP.x0;
+        outP.el.object3D.position.y = outP.y0 + outP.vy * outP.age;
+        outP.el.object3D.position.z = outP.z0;
       }
     });
 
     this.inflowParticles.forEach(inP => {
       inP.age += dt;
       const currentY = inP.y0 + inP.vy * inP.age;
-      
       if (currentY >= -this.tubeHalfHeight || inP.age >= inP.maxAge) {
         Object.assign(inP, this.makeInflowParticle(inP.el, false));
       } else {
         inP.el.object3D.position.set(inP.x, currentY, inP.z);
-        const progress = (currentY - inP.y0) / (-this.tubeHalfHeight - inP.y0);
-        inP.el.setAttribute('material', 'opacity', Math.max(0, 0.8 * (1 - progress)));
       }
     });
 
@@ -381,7 +423,6 @@ AFRAME.registerComponent('centrifuge-sim', {
     --hazard-yellow:#f2c14e;
     --hazard-red:#e4572e;
     --readout-teal:#5ec8c2;
-    --heavy-green:#2f7d5c;
     --panel-bg: rgba(24,26,29,0.95);
   }
   *{box-sizing:border-box;}
@@ -414,39 +455,30 @@ AFRAME.registerComponent('centrifuge-sim', {
   #panel.open{ transform:translate(-50%, 0); }
   #panel h1{ font-family:'Oswald',sans-serif; font-weight:700; font-size:10.5px; letter-spacing:1px; text-transform:uppercase;
     margin:0 0 6px; color:var(--hazard-yellow); display:flex; align-items:center; gap:6px; }
-  #panel h1::before{ content:""; width:6px;height:6px;border-radius:50%; background:var(--readout-teal); box-shadow:0 0 5px var(--readout-teal); }
 
   .row{display:flex; align-items:center; gap:6px; margin-bottom:5px;}
-  .row label{ font-size:8.5px; width:78px; flex-shrink:0; text-transform:uppercase; letter-spacing:0.3px; color:var(--steel-light); line-height:1.15; }
+  .row label{ font-size:8.5px; width:78px; flex-shrink:0; text-transform:uppercase; color:var(--steel-light); }
   .row input[type=range]{ flex:1; accent-color: var(--readout-teal); height:3px; }
-  .row .val{ width:58px; text-align:right; font-size:9px; color:var(--readout-teal); font-weight:600; flex-shrink:0; }
+  .row .val{ width:58px; text-align:right; font-size:9px; color:var(--readout-teal); font-weight:600; }
 
   #readouts{ display:grid; grid-template-columns:1fr 1fr; gap:3px 8px; margin:6px 0; padding:5px 7px;
     background:var(--steel-dark); border:1px solid var(--steel-mid); border-radius:4px; }
   #readouts div{font-size:8px; color:var(--steel-light);}
   #readouts span{color:var(--readout-teal); font-weight:600;}
   #readouts .g-val{color:var(--hazard-yellow); font-size:10px;}
-  #readouts .assumptions{ grid-column:1 / -1; font-size:7px; opacity:0.85; }
 
   #controls-bottom{ display:flex; align-items:center; justify-content:space-between; gap:6px; margin-top:5px; }
   #pause-btn{ pointer-events:auto; width:38px;height:38px;border-radius:50%;
     background:repeating-conic-gradient(var(--hazard-yellow) 0deg 20deg, var(--steel-dark) 20deg 40deg);
-    border:2px solid var(--steel-dark); display:flex;align-items:center;justify-content:center;
-    box-shadow:0 2px 6px rgba(0,0,0,0.5); cursor:pointer; flex-shrink:0; }
+    border:2px solid var(--steel-dark); display:flex;align-items:center;justify-content:center; cursor:pointer; }
   #pause-btn .core{ width:26px;height:26px;border-radius:50%; background:var(--hazard-red);
-    display:flex;align-items:center;justify-content:center; color:#fff; font-family:'Oswald',sans-serif;
-    font-weight:700; font-size:6px; text-align:center; line-height:1.05; border:1.5px solid #7a1e10; }
-  #pause-btn.is-paused .core{ background:#3a8f4c; border-color:#1f5c2c; }
-  #reset-btn{ pointer-events:auto; font-family:'Oswald',sans-serif; font-weight:700; font-size:8.5px; letter-spacing:0.5px;
-    text-transform:uppercase; color:#e9e9e9; background:var(--steel-mid); border:1px solid var(--steel-light);
-    padding:6px 9px; border-radius:4px; cursor:pointer; }
-  #status-tag{ font-size:7.5px; letter-spacing:0.5px; text-transform:uppercase; padding:3px 6px; border-radius:3px;
-    background:var(--steel-mid); color:var(--steel-light); }
+    display:flex;align-items:center;justify-content:center; color:#fff; font-family:'Oswald',sans-serif; font-weight:700; font-size:6px; }
+  #pause-btn.is-paused .core{ background:#3a8f4c; }
+  #reset-btn{ pointer-events:auto; font-family:'Oswald',sans-serif; font-weight:700; font-size:8.5px; color:#e9e9e9; background:var(--steel-mid); border:1px solid var(--steel-light); padding:6px 9px; border-radius:4px; cursor:pointer; }
+  #status-tag{ font-size:7.5px; text-transform:uppercase; padding:3px 6px; border-radius:3px; background:var(--steel-mid); color:var(--steel-light); }
   #status-tag.running{ color:#3a8f4c; }
-  #status-tag.paused{ color:var(--hazard-red); }
 
-  #legend{ display:flex; flex-wrap:wrap; gap:5px 10px; margin-top:6px; font-size:7px; color:var(--steel-light);
-    border-top:1px solid var(--steel-mid); padding-top:5px; }
+  #legend{ display:flex; flex-wrap:wrap; gap:5px 10px; margin-top:6px; font-size:7px; color:var(--steel-light); border-top:1px solid var(--steel-mid); padding-top:5px; }
   #legend span.dot{ display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:3px; }
 </style>
 </head>
@@ -454,43 +486,42 @@ AFRAME.registerComponent('centrifuge-sim', {
 
 <a-scene embedded arjs="sourceType: webcam; debugUIEnabled: false; detectionMode: mono_and_matrix;" vr-mode-ui="enabled: false" loading-screen="enabled: false" renderer="antialias:true; alpha:true; colorManagement:true;">
   <a-marker preset="hiro" id="hiro-marker">
-    <a-entity id="centrifuge-root" centrifuge-sim position="0 0.2 0" rotation="-90 0 0" scale="2.3 2.3 2.3"></a-entity>
+    <a-entity id="centrifuge-root" centrifuge-sim position="0 0.1 0" rotation="-90 0 0" scale="2.2 2.2 2.2"></a-entity>
   </a-marker>
   <a-entity camera></a-entity>
 </a-scene>
 
 <div id="hud">
   <div id="top-bar">
-    <div class="brand">AR · CENTRÍFUGA — SÍLICE/AGUA</div>
+    <div class="brand">AR · SIMULACIÓN INDUSTRIAL PREMIUN · CENTRÍFUGA TUBULAR</div>
     <div id="mini-readout">G = <span id="mini-g">—</span></div>
   </div>
 
   <button id="panel-toggle">▲ Controles</button>
 
   <div id="panel">
-    <h1>Panel — tazón tubular</h1>
+    <h1>Configuración de Proceso</h1>
 
     <div class="row">
-      <label for="rpm">RPM</label>
+      <label for="rpm">Velocidad (RPM)</label>
       <input type="range" id="rpm" min="500" max="8000" step="50" value="2000">
       <div class="val" id="rpm-val">2000</div>
     </div>
     <div class="row">
-      <label for="radio">Radio</label>
+      <label for="radio">Radio Tazón</label>
       <input type="range" id="radio" min="5" max="30" step="1" value="15">
       <div class="val" id="radio-val">15 cm</div>
     </div>
     <div class="row">
-      <label for="drho">Δρ sílice-agua</label>
+      <label for="drho">Δρ (S-L)</label>
       <input type="range" id="drho" min="200" max="2000" step="10" value="1650">
       <div class="val" id="drho-val">1650</div>
     </div>
 
     <div id="readouts">
       <div>ω: <span id="omega-val">—</span> rad/s</div>
-      <div>G: <span class="g-val" id="g-val">—</span></div>
-      <div>t migración: <span id="time-val">—</span></div>
-      <div class="assumptions">Dp=20µm · μ=1.002×10⁻³ Pa·s</div>
+      <div>Fuerza G: <span class="g-val" id="g-val">—</span></div>
+      <div>t residencia: <span id="time-val">—</span></div>
     </div>
 
     <div id="controls-bottom">
@@ -500,15 +531,14 @@ AFRAME.registerComponent('centrifuge-sim', {
     </div>
 
     <div id="legend">
-      <div><span class="dot" style="background:#f2c14e"></span>Sílice</div>
-      <div><span class="dot" style="background:#5ec8c2"></span>Agua</div>
-      <div><span class="dot" style="background:#e4572e"></span>Torta</div>
+      <div><span class="dot" style="background:#5ec8c2"></span>F. Ligera (Agua)</div>
+      <div><span class="dot" style="background:#2f7d5c"></span>F. Pesada (Sílice)</div>
+      <div><span class="dot" style="background:#f7cb63"></span>Alimentación</div>
     </div>
   </div>
 </div>
 
 <script>
-// Eventos del DOM enlazados al ciclo del UI
 document.getElementById('rpm').addEventListener('input', e => {
   SIM.rpm = parseFloat(e.target.value);
   document.getElementById('rpm-val').textContent = SIM.rpm;
@@ -540,7 +570,6 @@ pauseBtn.addEventListener('click', () => {
   pauseBtn.querySelector('.core').textContent = SIM.paused ? 'REAN.' : 'PAUSA';
   statusTag.textContent = SIM.paused ? 'PAUSADO' : 'OPERANDO';
   statusTag.classList.toggle('running', !SIM.paused);
-  statusTag.classList.toggle('paused', SIM.paused);
 });
 
 document.getElementById('reset-btn').addEventListener('click', () => {
