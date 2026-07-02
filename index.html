@@ -298,7 +298,7 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.tube.setAttribute('height', H * 1.9);
     this.tube.setAttribute('open-ended', 'true');
     this.tube.setAttribute('segments-radial', 24);
-    this.tube.setAttribute('material', 'color:#5ec8c2; opacity:0.16; shader:flat; side:double; transparent:true');
+    this.tube.setAttribute('material', 'color:#ffffff; opacity:0.01; shader:flat; side:double; transparent:true');
     body.appendChild(this.tube);
 
     ['top','bottom'].forEach(pos=>{
@@ -409,7 +409,7 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.cake.setAttribute('radius', tubeR * 0.95);
     this.cake.setAttribute('radius-tubular', 0.008);
     this.cake.setAttribute('rotation', '90 0 0');
-    this.cake.setAttribute('material', 'color:#e4572e; opacity:0.12; shader:flat; transparent:true');
+    this.cake.setAttribute('material', 'color:#d8c27a; opacity:0.18; shader:flat; transparent:true');
     body.appendChild(this.cake);
 
     this.el.appendChild(body);
