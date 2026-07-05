@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Simulador AR — Centrífuga Tubular Industrial</title>
 
+<!-- Librerías base con CDN estables de producción -->
 <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
-<script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/AR-js-org/AR.js@3.4.5/aframe/build/aframe-ar.js"></script>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght=500;700&family=IBM+Plex+Mono:wght=400;600&display=swap" rel="stylesheet">
@@ -36,7 +37,12 @@ function computePhysics(){
   const tRealSeconds = kReal > 0 ? Math.log(SIM.rDrumM / SIM.r0RealM) / kReal : Infinity;
   const kVisual = Math.max(K_VISUAL_MIN, Math.min(K_VISUAL_MAX, kReal * VISUAL_SPEEDUP));
   const omegaVisual = Math.max(OMEGA_VISUAL_MIN, Math.min(OMEGA_VISUAL_MAX, omega / 60));
-  return { omega, G, kReal, tRealSeconds, kVisual, omegaVisual };
+  
+  // Simulación de presiones (PSI)
+  const pInlet = 12.5 + (SIM.rpm / 1200) * (SIM.rpm / 1200) * 4.2;
+  const pOutlet = 4.0 + (SIM.rpm / 2000) * 2.5;
+
+  return { omega, G, kReal, tRealSeconds, kVisual, omegaVisual, pInlet, pOutlet };
 }
 
 function fmtTime(s){
@@ -57,6 +63,11 @@ function updateReadouts(){
   if(gv) gv.textContent = p.G.toFixed(0) + "×g";
   if(mg) mg.textContent = p.G.toFixed(0) + "×g";
   if(tv) tv.textContent = fmtTime(p.tRealSeconds);
+
+  const txtInlet = document.getElementById('press-inlet-text');
+  const txtOutlet = document.getElementById('press-outlet-text');
+  if(txtInlet) txtInlet.setAttribute('value', `PI-01\n${p.pInlet.toFixed(1)} PSI`);
+  if(txtOutlet) txtOutlet.setAttribute('value', `PI-02: ${p.pOutlet.toFixed(1)} PSI`);
 }
 
 AFRAME.registerComponent('centrifuge-sim', {
@@ -73,16 +84,43 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.settledCount = 0;
     
     this.numSilica = 26;
-    this.numWater = 15;
-    this.numOutflow = 16; 
-    this.numInflow = 22; // Más densidad de flujo de entrada
+    this.numWater = 18; 
+    this.numOutflow = 18; 
+    this.numInflow = 22; 
 
     this.structuralBody = document.createElement('a-entity');
     const H = this.tubeHalfHeight;
     const casingR = this.baseR * this.casingRatio;
     const tubeR = this.baseR * this.tubeRatio;
 
-    // ---- ESTILIZACIÓN DE LA BASE INFERIOR ----
+    // ---- CHASIS Y SOPORTE ESTRUCTURAL ----
+    const steelMaterial = 'color:#2b2e33; metalness:0.8; roughness:0.3';
+    
+    const mainPillar = document.createElement('a-box');
+    mainPillar.setAttribute('width', 0.05);
+    mainPillar.setAttribute('height', H * 2 + 0.4);
+    mainPillar.setAttribute('depth', 0.06);
+    mainPillar.setAttribute('position', `0 ${-0.05} ${-casingR - 0.05}`);
+    mainPillar.setAttribute('material', steelMaterial);
+    this.structuralBody.appendChild(mainPillar);
+
+    const lowerSupport = document.createElement('a-box');
+    lowerSupport.setAttribute('width', 0.12);
+    lowerSupport.setAttribute('height', 0.03);
+    lowerSupport.setAttribute('depth', 0.12);
+    lowerSupport.setAttribute('position', `0 ${-H - 0.05} ${-casingR / 2}`);
+    lowerSupport.setAttribute('material', steelMaterial);
+    this.structuralBody.appendChild(lowerSupport);
+
+    const upperSupport = document.createElement('a-box');
+    upperSupport.setAttribute('width', 0.12);
+    upperSupport.setAttribute('height', 0.03);
+    upperSupport.setAttribute('depth', 0.14);
+    upperSupport.setAttribute('position', `0 ${H + 0.12} ${-casingR / 2}`);
+    upperSupport.setAttribute('material', steelMaterial);
+    this.structuralBody.appendChild(upperSupport);
+
+    // ---- BASE DE LA MÁQUINA Y BRIDA ----
     const base = document.createElement('a-cylinder');
     base.setAttribute('radius', 0.11);
     base.setAttribute('height', 0.04);
@@ -90,7 +128,14 @@ AFRAME.registerComponent('centrifuge-sim', {
     base.setAttribute('material', 'color:#111215; metalness:0.9; roughness:0.2');
     this.structuralBody.appendChild(base);
 
-    // Maxitubo acrílico inferior transparente pulido
+    const feedFlange = document.createElement('a-cylinder');
+    feedFlange.setAttribute('radius', 0.045);
+    feedFlange.setAttribute('height', 0.015);
+    feedFlange.setAttribute('position', `0 ${-H - 0.04} 0`);
+    feedFlange.setAttribute('material', 'color:#495057; metalness:0.8; roughness:0.2');
+    this.structuralBody.appendChild(feedFlange);
+
+    // Maxitubo acrílico inferior transparente
     const feedPipe = document.createElement('a-cylinder');
     feedPipe.setAttribute('radius', 0.03); 
     feedPipe.setAttribute('height', 0.35);  
@@ -100,7 +145,78 @@ AFRAME.registerComponent('centrifuge-sim', {
 
     this.inflowSourceY = -H - 0.35;
 
-    // ---- CUERPO PRINCIPAL (ROTOR / BOWL) ----
+    // Válvula compacta en el costado izquierdo (-X)
+    const valveGroup = document.createElement('a-entity');
+    valveGroup.setAttribute('position', `-0.045 ${-H - 0.20} 0`);
+
+    const valveBody = document.createElement('a-box');
+    valveBody.setAttribute('width', 0.04); 
+    valveBody.setAttribute('height', 0.03); 
+    valveBody.setAttribute('depth', 0.03); 
+    valveBody.setAttribute('material', 'color:#a82323; metalness:0.6; roughness:0.4');
+    valveGroup.appendChild(valveBody);
+
+    const valveNeck = document.createElement('a-cylinder');
+    valveNeck.setAttribute('radius', 0.005); 
+    valveNeck.setAttribute('height', 0.02); 
+    valveNeck.setAttribute('position', '0 0 0.02');
+    valveNeck.setAttribute('rotation', '90 0 0'); 
+    valveNeck.setAttribute('material', 'color:#495057; metalness:0.8; roughness:0.2');
+    valveGroup.appendChild(valveNeck);
+
+    const valveWheel = document.createElement('a-torus');
+    valveWheel.setAttribute('radius', 0.015); 
+    valveWheel.setAttribute('radius-tubular', 0.0035);
+    valveWheel.setAttribute('position', '0 0 0.032');
+    valveWheel.setAttribute('material', 'color:#f2c14e; metalness:0.4; roughness:0.5');
+    valveGroup.appendChild(valveWheel);
+    this.structuralBody.appendChild(valveGroup);
+
+    // ---- MANÓMETRO ALIMENTACIÓN AL COSTADO DERECHO (+X) ----
+    const gaugeInlet = document.createElement('a-entity');
+    gaugeInlet.setAttribute('position', `0.055 ${-H - 0.26} 0.02`);
+    
+    const gaugeCase1 = document.createElement('a-cylinder');
+    gaugeCase1.setAttribute('radius', 0.016); 
+    gaugeCase1.setAttribute('height', 0.008);
+    gaugeCase1.setAttribute('rotation', '90 0 0');
+    gaugeCase1.setAttribute('material', 'color:#eceff1; metalness:0.7; roughness:0.2');
+    gaugeInlet.appendChild(gaugeCase1);
+
+    const textInlet = document.createElement('a-text');
+    textInlet.setAttribute('id', 'press-inlet-text');
+    textInlet.setAttribute('value', 'PI-01\n-- PSI');
+    textInlet.setAttribute('color', '#1c1e21');
+    textInlet.setAttribute('align', 'center');
+    textInlet.setAttribute('width', 0.22); 
+    textInlet.setAttribute('position', '0 0 0.005');
+    textInlet.setAttribute('font', 'mozillavr');
+    gaugeInlet.appendChild(textInlet);
+    this.structuralBody.appendChild(gaugeInlet);
+
+    // Manómetro de Salida (PI-02)
+    const gaugeOutlet = document.createElement('a-entity');
+    gaugeOutlet.setAttribute('position', `${tubeR + 0.16} ${H + 0.05} 0.04`);
+    
+    const gaugeCase2 = document.createElement('a-cylinder');
+    gaugeCase2.setAttribute('radius', 0.022);
+    gaugeCase2.setAttribute('height', 0.01);
+    gaugeCase2.setAttribute('rotation', '90 0 0');
+    gaugeCase2.setAttribute('material', 'color:#eceff1; metalness:0.7; roughness:0.2');
+    gaugeOutlet.appendChild(gaugeCase2);
+
+    const textOutlet = document.createElement('a-text');
+    textOutlet.setAttribute('id', 'press-outlet-text');
+    textOutlet.setAttribute('value', 'PI-02: -- PSI');
+    textOutlet.setAttribute('color', '#1c1e21');
+    textOutlet.setAttribute('align', 'center');
+    textOutlet.setAttribute('width', 0.28);
+    textOutlet.setAttribute('position', '0 0 0.006');
+    textOutlet.setAttribute('font', 'mozillavr');
+    gaugeOutlet.appendChild(textOutlet);
+    this.structuralBody.appendChild(gaugeOutlet);
+
+    // ---- CUERPO PRINCIPAL (ROTOR) ----
     this.casing = document.createElement('a-cylinder');
     this.casing.setAttribute('radius', casingR);
     this.casing.setAttribute('height', H * 2);
@@ -116,7 +232,6 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.tube.setAttribute('material', 'color:#5ec8c2; opacity:0.12; shader:flat; side:double; transparent:true');
     this.structuralBody.appendChild(this.tube);
 
-    // Eje Central Cromado
     this.axis = document.createElement('a-cylinder');
     this.axis.setAttribute('radius', 0.006);
     this.axis.setAttribute('height', H * 2 + 0.28);
@@ -124,9 +239,7 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.axis.setAttribute('material', 'color:#ffffff; metalness:1.0; roughness:0.05');
     this.structuralBody.appendChild(this.axis);
 
-    // ---- REDISEÑO ESTÉTICO SUPERIOR (IMPRESIONANTE) ----
-    
-    // Plato Colector Superior (Heavy Phase Volute)
+    // ---- COLECTORES SUPERIORES ----
     const heavyCollector = document.createElement('a-cylinder');
     heavyCollector.setAttribute('radius', casingR + 0.01);
     heavyCollector.setAttribute('height', 0.04);
@@ -134,7 +247,6 @@ AFRAME.registerComponent('centrifuge-sim', {
     heavyCollector.setAttribute('material', 'color:#2a2d32; metalness:0.9; roughness:0.1');
     this.structuralBody.appendChild(heavyCollector);
 
-    // Plato Colector Superior (Light Phase Volute)
     const lightCollector = document.createElement('a-cylinder');
     lightCollector.setAttribute('radius', tubeR + 0.02);
     lightCollector.setAttribute('height', 0.03);
@@ -142,24 +254,23 @@ AFRAME.registerComponent('centrifuge-sim', {
     lightCollector.setAttribute('material', 'color:#3a3f44; metalness:0.9; roughness:0.1');
     this.structuralBody.appendChild(lightCollector);
 
-    // Cubierta Estilizada del Motor Eléctrico
+    // Motor Eléctrico
     this.motorGroup = document.createElement('a-entity');
     this.motorGroup.setAttribute('position', `0 ${H + 0.16} 0`);
     
     const motorCasing = document.createElement('a-cylinder');
-    motorCasing.setAttribute('radius', 0.05);
+    motorCasing.setAttribute('radius', 0.048);
     motorCasing.setAttribute('height', 0.09);
     motorCasing.setAttribute('rotation', '0 0 90'); 
-    motorCasing.setAttribute('position', '0.06 0 0');
+    motorCasing.setAttribute('position', '0.05 0 0');
     motorCasing.setAttribute('material', 'color:#22252a; metalness:0.8; roughness:0.3');
     this.motorGroup.appendChild(motorCasing);
 
-    // Aletas de ventilación del motor (Detalle de ingeniería)
     const coolingFins = document.createElement('a-box');
-    coolingFins.setAttribute('width', 0.02);
-    coolingFins.setAttribute('height', 0.07);
-    coolingFins.setAttribute('depth', 0.07);
-    coolingFins.setAttribute('position', '0.11 0 0');
+    coolingFins.setAttribute('width', 0.018);
+    coolingFins.setAttribute('height', 0.065);
+    coolingFins.setAttribute('depth', 0.065);
+    coolingFins.setAttribute('position', '0.10 0 0');
     coolingFins.setAttribute('material', 'color:#111215; metalness:0.7; roughness:0.4');
     this.motorGroup.appendChild(coolingFins);
 
@@ -171,10 +282,10 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.motorGroup.appendChild(motorCap);
     this.structuralBody.appendChild(this.motorGroup);
 
-    // ---- TUBERÍAS DE CRISTAL INDUSTRIAL (TRANSPARENTES) ----
+    // ---- TUBERÍAS DE DESCARGA ----
     const premiumGlass = 'color:#d0ebff; opacity:0.25; transparent:true; shader:standard; metalness:0.98; roughness:0.02; side:double';
     
-    // Derecha: Ducto de Agua Ligera
+    // Derecha: Agua Ligera
     const lightPipeH = document.createElement('a-cylinder');
     lightPipeH.setAttribute('radius', 0.014);
     lightPipeH.setAttribute('height', 0.08);
@@ -192,7 +303,7 @@ AFRAME.registerComponent('centrifuge-sim', {
     
     this.lightOutflowSource = new AFRAME.THREE.Vector3(tubeR + 0.08, H + 0.05, 0);
 
-    // Izquierda: Ducto de Sílice Pesada
+    // Izquierda: Sílice Pesada
     const heavyPipeH = document.createElement('a-cylinder');
     heavyPipeH.setAttribute('radius', 0.015);
     heavyPipeH.setAttribute('height', 0.08);
@@ -210,7 +321,6 @@ AFRAME.registerComponent('centrifuge-sim', {
 
     this.heavyOutflowSource = new AFRAME.THREE.Vector3(-casingR - 0.08, H + 0.02, 0);
 
-    // Sólidos retenidos (Torta)
     this.cake = document.createElement('a-torus');
     this.cake.setAttribute('radius', tubeR * 0.95);
     this.cake.setAttribute('radius-tubular', 0.009);
@@ -218,7 +328,7 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.cake.setAttribute('material', 'color:#e4572e; opacity:0.12; shader:flat; transparent:true');
     this.structuralBody.appendChild(this.cake);
 
-    // ---- SISTEMAS DE PARTÍCULAS DINÁMICAS ----
+    // ---- SISTEMAS DE PARTÍCULAS ----
     this.spinGroup = document.createElement('a-entity');
     this.structuralBody.appendChild(this.spinGroup);
 
@@ -228,7 +338,6 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.inflowGroup = document.createElement('a-entity');
     this.structuralBody.appendChild(this.inflowGroup);
 
-    // Inicialización de fluidos internos
     for (let i = 0; i < this.numSilica; i++) {
       const sphere = document.createElement('a-sphere');
       sphere.setAttribute('radius', 0.0075);
@@ -242,15 +351,16 @@ AFRAME.registerComponent('centrifuge-sim', {
       sphere.setAttribute('radius', 0.0055);
       sphere.setAttribute('material', 'color:#5ec8c2; shader:flat; opacity:0.75; transparent:true');
       this.spinGroup.appendChild(sphere);
+      
+      const normalizedH = (Math.random() - 0.5) * H * 1.7; 
       this.waterParticles.push({
         el: sphere,
-        rRatio: 0.12 + Math.random() * 0.58, 
+        rBaseRatio: 0.15 + Math.random() * 0.45, 
         theta: Math.random() * Math.PI * 2,
-        h: (Math.random() - 0.5) * H * 1.7
+        h: normalizedH
       });
     }
 
-    // Descarga confinada
     for (let i = 0; i < this.numOutflow; i++) {
       const spL = document.createElement('a-sphere');
       spL.setAttribute('radius', 0.005);
@@ -265,11 +375,10 @@ AFRAME.registerComponent('centrifuge-sim', {
       this.heavyOutflowParticles.push(this.makeOutflowParticle(spH, true, 'heavy'));
     }
 
-    // ---- OPTIMIZACIÓN: ALIMENTACIÓN ALTAMENTE VISIBLE ----
     for (let i = 0; i < this.numInflow; i++) {
       const sphere = document.createElement('a-sphere');
-      sphere.setAttribute('radius', 0.014); // Partículas grandes e impactantes
-      sphere.setAttribute('material', 'color:#f7cb63; shader:flat; emissive:#e0a41b; emissiveIntensity:0.5; transparent:false');
+      sphere.setAttribute('radius', 0.014); 
+      sphere.setAttribute('material', 'color:#f7cb63; shader:flat; emissive:#e0a41b; emissiveIntensity:0.5');
       this.inflowGroup.appendChild(sphere);
       this.inflowParticles.push(this.makeInflowParticle(sphere, true));
     }
@@ -300,14 +409,15 @@ AFRAME.registerComponent('centrifuge-sim', {
       z0: source.z,
       vy: -0.25 - Math.random() * 0.15, 
       age: randomize ? Math.random() * 1.1 : 0,
-      maxAge: 1.0
+      maxAge: 1.0,
+      seed: Math.random() * 100
     };
   },
 
   makeInflowParticle: function(el, randomize) {
     return {
       el,
-      x: (Math.random() - 0.5) * 0.02, // Distribución fluida dentro del gran tubo
+      x: (Math.random() - 0.5) * 0.02, 
       y0: this.inflowSourceY,
       z: (Math.random() - 0.5) * 0.02,
       vy: 0.28 + Math.random() * 0.08, 
@@ -336,6 +446,7 @@ AFRAME.registerComponent('centrifuge-sim', {
     this.structuralBody.object3D.scale.set(scaleFactor, 1, scaleFactor);
     
     const tR = this._baseTubeR; 
+    const H = this.tubeHalfHeight;
 
     if (SIM.paused) return;
 
@@ -369,9 +480,12 @@ AFRAME.registerComponent('centrifuge-sim', {
 
     this.waterParticles.forEach(w => {
       w.theta += p.omegaVisual * dt * 0.55;
-      const currentR = w.rRatio * tR;
-      const x = currentR * Math.cos(w.theta);
-      const z = currentR * Math.sin(w.theta);
+      const heightFactor = (w.h + H) / (2 * H); 
+      const vortexExpansion = 1.0 + (heightFactor * 0.45); 
+      
+      const currentR = w.rBaseRatio * tR * vortexExpansion;
+      const x = Math.min(tR * 0.98, currentR) * Math.cos(w.theta);
+      const z = Math.min(tR * 0.98, currentR) * Math.sin(w.theta);
       w.el.object3D.position.set(x, w.h, z);
     });
 
@@ -380,9 +494,13 @@ AFRAME.registerComponent('centrifuge-sim', {
       if (outP.age >= outP.maxAge) {
         Object.assign(outP, this.makeOutflowParticle(outP.el, false, 'light'));
       } else {
-        outP.el.object3D.position.x = outP.x0;
+        const sprayFactor = Math.max(0, 1.0 - outP.age * 3.5); 
+        const noiseX = Math.sin(time * 0.05 + outP.seed) * 0.007 * sprayFactor;
+        const noiseZ = Math.cos(time * 0.04 + outP.seed) * 0.007 * sprayFactor;
+
+        outP.el.object3D.position.x = outP.x0 + noiseX;
         outP.el.object3D.position.y = outP.y0 + outP.vy * outP.age;
-        outP.el.object3D.position.z = outP.z0;
+        outP.el.object3D.position.z = outP.z0 + noiseZ;
       }
     });
 
@@ -391,9 +509,13 @@ AFRAME.registerComponent('centrifuge-sim', {
       if (outP.age >= outP.maxAge) {
         Object.assign(outP, this.makeOutflowParticle(outP.el, false, 'heavy'));
       } else {
-        outP.el.object3D.position.x = outP.x0;
+        const sprayFactor = Math.max(0, 1.0 - outP.age * 3.5);
+        const noiseX = Math.cos(time * 0.05 + outP.seed) * 0.007 * sprayFactor;
+        const noiseZ = Math.sin(time * 0.04 + outP.seed) * 0.007 * sprayFactor;
+
+        outP.el.object3D.position.x = outP.x0 + noiseX;
         outP.el.object3D.position.y = outP.y0 + outP.vy * outP.age;
-        outP.el.object3D.position.z = outP.z0;
+        outP.el.object3D.position.z = outP.z0 + noiseZ;
       }
     });
 
@@ -442,13 +564,14 @@ AFRAME.registerComponent('centrifuge-sim', {
     background:var(--hazard-yellow); color:var(--steel-dark); font-family:'Oswald',sans-serif; font-weight:700;
     font-size:10px; letter-spacing:1px; text-transform:uppercase; padding:6px 14px; border-radius:16px; border:none;
     box-shadow:0 3px 8px rgba(0,0,0,0.5); z-index:25; }
-  #panel{
+  
+  #panel {
     position:absolute; left:50%; bottom:0; transform:translate(-50%, 100%);
-    width:min(88vw, 300px);
+    width:min(92vw, 315px);
     background:var(--panel-bg); border:1px solid var(--steel-mid); border-bottom:none;
     border-radius:10px 10px 0 0;
-    padding:8px 10px 10px; pointer-events:auto; color:#e9e9e9;
-    max-height:44vh; overflow-y:auto;
+    padding:10px 12px 14px; pointer-events:auto; color:#e9e9e9;
+    max-height:48vh; overflow-y:auto;
     transition:transform 0.22s ease;
     box-shadow:0 -4px 16px rgba(0,0,0,0.5);
   }
@@ -478,8 +601,30 @@ AFRAME.registerComponent('centrifuge-sim', {
   #status-tag{ font-size:7.5px; text-transform:uppercase; padding:3px 6px; border-radius:3px; background:var(--steel-mid); color:var(--steel-light); }
   #status-tag.running{ color:#3a8f4c; }
 
-  #legend{ display:flex; flex-wrap:wrap; gap:5px 10px; margin-top:6px; font-size:7px; color:var(--steel-light); border-top:1px solid var(--steel-mid); padding-top:5px; }
-  #legend span.dot{ display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:3px; }
+  /* CORREGIDO: Contenedor adaptativo para que la leyenda de partículas nunca se corte */
+  #legend { 
+    display: flex; 
+    flex-wrap: wrap; 
+    gap: 6px 12px; 
+    margin-top: 10px; 
+    font-size: 8.5px; /* Aumentado un poco el contraste de lectura */
+    color: var(--steel-light); 
+    border-top: 1px solid var(--steel-mid); 
+    padding-top: 8px; 
+  }
+  #legend .item {
+    display: flex;
+    align-items: center;
+    white-space: nowrap; /* Evita saltos de línea feos a mitad de palabra */
+  }
+  #legend span.dot{ 
+    display: inline-block; 
+    width: 7px; 
+    height: 7px; 
+    border-radius: 50%; 
+    margin-right: 4px; 
+    flex-shrink: 0;
+  }
 </style>
 </head>
 <body>
@@ -493,7 +638,7 @@ AFRAME.registerComponent('centrifuge-sim', {
 
 <div id="hud">
   <div id="top-bar">
-    <div class="brand">AR · SIMULACIÓN INDUSTRIAL PREMIUN · CENTRÍFUGA TUBULAR</div>
+    <div class="brand">AR · DIGITAL TWIN FINAL · CENTRÍFUGA TUBULAR</div>
     <div id="mini-readout">G = <span id="mini-g">—</span></div>
   </div>
 
@@ -530,10 +675,11 @@ AFRAME.registerComponent('centrifuge-sim', {
       <div id="status-tag" class="running">OPERANDO</div>
     </div>
 
+    <!-- Leyenda adaptada -->
     <div id="legend">
-      <div><span class="dot" style="background:#5ec8c2"></span>F. Ligera (Agua)</div>
-      <div><span class="dot" style="background:#2f7d5c"></span>F. Pesada (Sílice)</div>
-      <div><span class="dot" style="background:#f7cb63"></span>Alimentación</div>
+      <div class="item"><span class="dot" style="background:#5ec8c2"></span>F. Ligera (Agua)</div>
+      <div class="item"><span class="dot" style="background:#2f7d5c"></span>F. Pesada (Sílice)</div>
+      <div class="item"><span class="dot" style="background:#f7cb63"></span>Alimentación</div>
     </div>
   </div>
 </div>
