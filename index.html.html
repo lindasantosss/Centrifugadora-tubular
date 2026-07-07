@@ -1,0 +1,1123 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Simulador AR — Centrífuga Tubular Industrial</title>
+
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/AR-js-org/AR.js@3.4.5/aframe/build/aframe-ar.js"></script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght=500;700&family=IBM+Plex+Mono:wght=400;600&display=swap" rel="stylesheet">
+
+<script>
+const SIM = {
+  rpm: 2000,
+  rDrumM: 0.15,
+  deltaRho: 1661, // ρ_sílice (2650) − ρ_agua (989), según densidades reales del sistema
+  rhoAgua: 989,   // densidad de referencia del agua (kg/m3), fase ligera
+  caudal: 150,    // caudal de alimentación (L/min), variable de control
+  cv: 0.08,       // fracción volumétrica de sólidos en la alimentación (Cv)
+  phiEmpaque: 0.60, // fracción de empaquetamiento de la torta compactada (típico 0.55-0.65)
+  paused: false,
+  discharging: false, 
+  dp: 20e-6,
+  mu: 1.002e-3,
+  g: 9.81,
+  r0RealM: 0.001,
+  solidsAccumM3: 0, // acumulador del balance de masa de sólidos (se resetea tras cada descarga)
+  monitoredVInstantMs: NaN // v(r_actual) de la partícula de sílice monitoreada (actualizado en tick())
+};
+
+// Relación radio del núcleo líquido / radio del tazón. Única fuente de verdad:
+// usada tanto en la geometría (componente A-Frame) como en el balance de masa.
+const TUBE_RATIO = 0.32;
+
+const VISUAL_SPEEDUP = 1.8;
+const K_VISUAL_MIN = 0.15, K_VISUAL_MAX = 5.0;
+const OMEGA_VISUAL_MIN = 0.4, OMEGA_VISUAL_MAX = 8.0;
+
+function omegaFromRPM(rpm){ return 2 * Math.PI * rpm / 60; }
+
+function computePhysics(){
+  const omega = omegaFromRPM(SIM.rpm);
+  const G = (omega * omega * SIM.rDrumM) / SIM.g;
+
+  // Longitud del tambor ligada al radio para conservar la proporción tubular
+  // (L0=0.60 m a R0=0.15 m en el modelo base -> L = 4*R siempre, L/D = 2)
+  const LDrumM = 4 * SIM.rDrumM;
+
+  // --- Tiempo de SEDIMENTACIÓN (Stokes centrífugo): cuánto tarda una partícula
+  // en migrar desde cerca del eje hasta la pared. NO depende del caudal: es una
+  // propiedad de la partícula/fluido/velocidad angular, no del proceso continuo.
+  const kReal = (SIM.dp * SIM.dp * SIM.deltaRho * omega * omega) / (18 * SIM.mu);
+  const tSedimentacionSeconds = kReal > 0 ? Math.log(SIM.rDrumM / SIM.r0RealM) / kReal : Infinity;
+
+  // --- Velocidad de migración radial (ley de Stokes centrífuga, Ec. 14.4-8):
+  // v(r) = dr/dt = (dp^2 * Δρ * ω^2 * r) / (18*μ) = kReal * r
+  // kReal ya agrupa dp², Δρ, ω² y 18μ. La velocidad INSTANTÁNEA real (según la
+  // posición radial actual de cada partícula) se calcula en tick(), partícula
+  // por partícula, usando este mismo kReal (ver componente centrifuge-sim).
+  // Aquí solo se deja un valor de referencia/diseño evaluado en la pared (r=R),
+  // que es el caso límite (máxima velocidad posible) usado como dato técnico.
+  const vMaxDisenoMs = kReal * SIM.rDrumM;
+
+  // --- Tiempo de RESIDENCIA real (proceso continuo): volumen del tazón / caudal.
+  // Aquí sí entra el caudal, correctamente convertido de L/min a m3/s.
+  const QM3s = (SIM.caudal / 1000) / 60; // 1 L = 1e-3 m3 ; /min -> /s
+  const VLiquidoM3 = Math.PI * SIM.rDrumM * SIM.rDrumM * LDrumM;
+  const tResidenciaSeconds = QM3s > 0 ? VLiquidoM3 / QM3s : Infinity;
+
+  // Si el tiempo de residencia disponible es menor que el de sedimentación
+  // requerido, la partícula sale con el líquido sin llegar a la pared.
+  const separacionOK = tResidenciaSeconds >= tSedimentacionSeconds;
+
+  // --- BALANCE DE MASA DE SÓLIDOS (descarga automática) ---
+  // V_torta,max = π(R² − r_core²) L φ_empaque
+  const rCoreM = SIM.rDrumM * TUBE_RATIO;
+  const VTortaMaxM3 = Math.PI * (SIM.rDrumM * SIM.rDrumM - rCoreM * rCoreM) * LDrumM * SIM.phiEmpaque;
+
+  // Q_solidos = Q_alimentación x Cv
+  const QAlimentacionM3s = QM3s; // ya convertido de L/min a m3/s arriba
+  const QSolidosM3s = QAlimentacionM3s * SIM.cv;
+
+  // t_descarga = V_torta,max / Q_solidos
+  const tDescargaSeconds = QSolidosM3s > 0 ? VTortaMaxM3 / QSolidosM3s : Infinity;
+
+  const kVisual = Math.max(K_VISUAL_MIN, Math.min(K_VISUAL_MAX, kReal * VISUAL_SPEEDUP * 0.05));
+  const omegaVisual = Math.max(OMEGA_VISUAL_MIN, Math.min(OMEGA_VISUAL_MAX, omega / 60));
+
+  // Factor de aceleración visual: la misma relación kVisual/kReal que ya se usa
+  // para que la sedimentación de partículas sea visible en segundos en vez de
+  // en minutos/horas reales. Se aplica también al reloj del balance de masa,
+  // para que el disparo automático sea físicamente consistente con el resto
+  // de la animación (misma "línea de tiempo" acelerada en todo el simulador).
+  const visualTimeAccel = kReal > 0 ? (kVisual / kReal) : 1;
+
+  const fillFraction = VTortaMaxM3 > 0 ? Math.min(1, SIM.solidsAccumM3 / VTortaMaxM3) : 0;
+  
+  const caudalFactor = SIM.caudal / 150; // 150 L/min = caudal de referencia
+  const pInlet = SIM.discharging ? 0 : (12.5 + (SIM.rpm / 1200) * (SIM.rpm / 1200) * 4.2 + caudalFactor * 1.8);
+  const pOutlet = SIM.discharging ? 0 : (4.0 + (SIM.rpm / 2000) * 2.5 + caudalFactor * 0.6);
+
+  const rhoAgua = SIM.rhoAgua;
+  const rhoSilice = SIM.rhoAgua + SIM.deltaRho;
+
+  return { omega, G, kReal, LDrumM, tSedimentacionSeconds, tResidenciaSeconds, separacionOK,
+    vMaxDisenoMs, kVisual, omegaVisual, pInlet, pOutlet, rhoAgua, rhoSilice, caudalFactor,
+    rCoreM, VTortaMaxM3, QAlimentacionM3s, QSolidosM3s, tDescargaSeconds, visualTimeAccel, fillFraction };
+}
+
+function fmtTime(s){
+  if (!isFinite(s)) return "—";
+  if (s < 60) return s.toFixed(1) + " s";
+  if (s < 3600) return (s/60).toFixed(1) + " min";
+  return (s/3600).toFixed(2) + " h";
+}
+
+function fmtVelocity(v){
+  if (!isFinite(v)) return "—";
+  const mms = v * 1000;
+  if (mms < 1) return (v * 1e6).toFixed(1) + " µm/s";
+  if (mms < 1000) return mms.toFixed(2) + " mm/s";
+  return v.toFixed(3) + " m/s";
+}
+
+function fmtVolumeL(m3){
+  if (!isFinite(m3)) return "—";
+  return (m3 * 1000).toFixed(2) + " L";
+}
+
+function fmtFlowLmin(m3s){
+  if (!isFinite(m3s)) return "—";
+  return (m3s * 1000 * 60).toFixed(3) + " L/min";
+}
+
+function updateReadouts(){
+  const p = computePhysics();
+  const ov = document.getElementById('omega-val');
+  const gv = document.getElementById('g-val');
+  const mg = document.getElementById('mini-g');
+  const tresv = document.getElementById('time-res-val');
+  const tsedv = document.getElementById('time-sed-val');
+  const vmigv = document.getElementById('vmig-actual-val');
+  const vmaxv = document.getElementById('vmax-diseno-val');
+  const statusv = document.getElementById('separation-status');
+  const vtortav = document.getElementById('vtorta-val');
+  const qsolidosv = document.getElementById('qsolidos-val');
+  const tdescargav = document.getElementById('tdescarga-val');
+  const fillbarv = document.getElementById('fill-bar-inner');
+  const fillpctv = document.getElementById('fill-pct-val');
+  
+  if(ov) ov.textContent = p.omega.toFixed(1);
+  if(gv) gv.textContent = p.G.toFixed(0) + "×g";
+  if(mg) mg.textContent = p.G.toFixed(0) + "×g";
+  if(tresv) tresv.textContent = fmtTime(p.tResidenciaSeconds);
+  if(tsedv) tsedv.textContent = fmtTime(p.tSedimentacionSeconds);
+  if(vmigv) vmigv.textContent = fmtVelocity(SIM.monitoredVInstantMs);
+  if(vmaxv) vmaxv.textContent = fmtVelocity(p.vMaxDisenoMs);
+  if(statusv){
+    statusv.textContent = p.separacionOK ? '✓ SEPARA' : '✗ ARRASTRE';
+    statusv.style.color = p.separacionOK ? '#3a8f4c' : '#e4572e';
+  }
+  if(vtortav) vtortav.textContent = fmtVolumeL(p.VTortaMaxM3);
+  if(qsolidosv) qsolidosv.textContent = fmtFlowLmin(p.QSolidosM3s);
+  if(tdescargav) tdescargav.textContent = fmtTime(p.tDescargaSeconds);
+  if(fillbarv) fillbarv.style.width = (p.fillFraction * 100).toFixed(0) + "%";
+  if(fillpctv) fillpctv.textContent = (p.fillFraction * 100).toFixed(0) + "%";
+
+  const txtInlet = document.getElementById('press-inlet-text');
+  const txtOutlet = document.getElementById('press-outlet-text');
+  if(txtInlet) txtInlet.setAttribute('value', `PI-01\n${p.pInlet.toFixed(1)} PSI`);
+  if(txtOutlet) txtOutlet.setAttribute('value', `PI-02: ${p.pOutlet.toFixed(1)} PSI`);
+
+  const raEl = document.getElementById('rho-agua-val');
+  const rsEl = document.getElementById('rho-silice-val');
+  const rdEl = document.getElementById('rho-delta-val');
+  const cqEl = document.getElementById('caudal-table-val');
+  if(raEl) raEl.textContent = p.rhoAgua.toFixed(0) + " kg/m³";
+  if(rsEl) rsEl.textContent = p.rhoSilice.toFixed(0) + " kg/m³";
+  if(rdEl) rdEl.textContent = SIM.deltaRho.toFixed(0) + " kg/m³";
+  if(cqEl) cqEl.textContent = SIM.caudal.toFixed(0) + " L/min";
+}
+
+AFRAME.registerComponent('centrifuge-sim', {
+  init: function () {
+    this.baseR = 0.15; 
+    this.tubeHalfHeight = 0.30;      
+    this.tubeRatio = TUBE_RATIO;           
+    this.casingRatio = 0.46;         
+    this.silicaParticles = [];
+    this.waterParticles = [];
+    this.lightOutflowParticles = []; 
+    this.inflowParticles = []; 
+    this.settledCount = 0;
+    this.fillingTime = 0; 
+    
+    this.numSilica = 35; 
+    this.numWater = 35; 
+    this.numOutflow = 18; 
+    this.numInflow = 24; 
+
+    this.structuralBody = document.createElement('a-entity');
+    const H = this.tubeHalfHeight;
+    const casingR = this.baseR * this.casingRatio;
+    const tubeR = this.baseR * this.tubeRatio;
+
+    const steelMaterial = 'color:#2b2e33; metalness:0.8; roughness:0.3';
+    // depthWrite:false evita que el "vidrio" transparente oculte las partículas internas
+    // (bug de orden de transparencia en three.js/WebGL) — clave para que el agua se vea.
+    const premiumGlass = 'color:#d0ebff; opacity:0.25; transparent:true; shader:standard; metalness:0.98; roughness:0.02; side:double; depthWrite:false';
+    // Material distintivo (tono ámbar) exclusivo para el ducto de descarga de sílice,
+    // así se diferencia claramente de los ductos de alimentación/salida de líquido (azulados).
+    const dischargeGlassIdle = 'color:#f4b183; opacity:0.35; transparent:true; shader:standard; metalness:0.9; roughness:0.05; side:double; depthWrite:false';
+    const dischargeGlassActive = 'color:#e4572e; opacity:0.6; transparent:true; shader:standard; metalness:0.7; roughness:0.05; emissive:#e4572e; emissiveIntensity:0.45; side:double; depthWrite:false';
+    
+    // ---- ESTRUCTURA ----
+    const mainPillar = document.createElement('a-box');
+    mainPillar.setAttribute('width', 0.05);
+    mainPillar.setAttribute('height', H * 2 + 0.4);
+    mainPillar.setAttribute('depth', 0.06);
+    mainPillar.setAttribute('position', `0 ${-0.05} ${-casingR - 0.05}`);
+    mainPillar.setAttribute('material', steelMaterial);
+    this.structuralBody.appendChild(mainPillar);
+
+    const lowerSupport = document.createElement('a-box');
+    lowerSupport.setAttribute('width', 0.12);
+    lowerSupport.setAttribute('height', 0.03);
+    lowerSupport.setAttribute('depth', 0.12);
+    lowerSupport.setAttribute('position', `0 ${-H - 0.05} ${-casingR / 2}`);
+    lowerSupport.setAttribute('material', steelMaterial);
+    this.structuralBody.appendChild(lowerSupport);
+
+    const upperSupport = document.createElement('a-box');
+    upperSupport.setAttribute('width', 0.12);
+    upperSupport.setAttribute('height', 0.03);
+    upperSupport.setAttribute('depth', 0.14);
+    upperSupport.setAttribute('position', `0 ${H + 0.12} ${-casingR / 2}`);
+    upperSupport.setAttribute('material', steelMaterial);
+    this.structuralBody.appendChild(upperSupport);
+
+    const base = document.createElement('a-cylinder');
+    base.setAttribute('radius', 0.12);
+    base.setAttribute('height', 0.04);
+    base.setAttribute('position', `0 ${-H - 0.02} 0`);
+    base.setAttribute('material', 'color:#111215; metalness:0.9; roughness:0.2');
+    this.structuralBody.appendChild(base);
+
+    // ---- ALIMENTACIÓN CENTRAL ----
+    const feedFlange = document.createElement('a-cylinder');
+    feedFlange.setAttribute('radius', 0.022);
+    feedFlange.setAttribute('height', 0.015);
+    feedFlange.setAttribute('position', `0 ${-H - 0.04} 0`);
+    feedFlange.setAttribute('material', 'color:#495057; metalness:0.8; roughness:0.2');
+    this.structuralBody.appendChild(feedFlange);
+
+    const feedPipe = document.createElement('a-cylinder');
+    feedPipe.setAttribute('radius', 0.015); 
+    feedPipe.setAttribute('height', 0.30);  
+    feedPipe.setAttribute('position', `0 ${-H - 0.17} 0`); 
+    feedPipe.setAttribute('material', premiumGlass);
+    this.structuralBody.appendChild(feedPipe);
+
+    this.inflowSourceX = 0;
+    this.inflowSourceY = -H - 0.30;
+
+    // ---- DUCTO DE DESCARGA CONFINADO (costado inferior derecho) ----
+    const dischargeGate = document.createElement('a-box');
+    dischargeGate.setAttribute('width', 0.03);
+    dischargeGate.setAttribute('height', 0.03);
+    dischargeGate.setAttribute('depth', 0.03);
+    dischargeGate.setAttribute('position', `0.04 ${-H - 0.02} 0`);
+    dischargeGate.setAttribute('material', 'color:#e4572e; metalness:0.7; roughness:0.25');
+    this.structuralBody.appendChild(dischargeGate);
+
+    const dischargePipeH = document.createElement('a-cylinder');
+    dischargePipeH.setAttribute('radius', 0.012);
+    dischargePipeH.setAttribute('height', 0.12);
+    dischargePipeH.setAttribute('rotation', '0 0 90'); 
+    dischargePipeH.setAttribute('position', `0.11 ${-H - 0.02} 0`);
+    dischargePipeH.setAttribute('material', dischargeGlassIdle); 
+    this.structuralBody.appendChild(dischargePipeH);
+
+    this.dischargePipeH = dischargePipeH;
+    this.dischargeGlassIdle = dischargeGlassIdle;
+    this.dischargeGlassActive = dischargeGlassActive;
+    this.dischargeLimitX = 0.17; 
+
+    // Etiqueta que identifica claramente el ducto de salida de sílice.
+    // Alineada a la MISMA altura (y) que el ducto físico y el punto donde las
+    // partículas realmente desaparecen (-H-0.02), justo después del extremo
+    // del tubo (dischargeLimitX). Antes estaba 0.08 unidades más abajo, por lo
+    // que visualmente no coincidía con el punto real de salida del sílice.
+    const dischargeLabel = document.createElement('a-text');
+    dischargeLabel.setAttribute('value', 'SALIDA\nSÍLICE');
+    dischargeLabel.setAttribute('color', '#e4572e');
+    dischargeLabel.setAttribute('align', 'center');
+    dischargeLabel.setAttribute('width', 0.6);
+    dischargeLabel.setAttribute('position', `0.22 ${-H - 0.02} 0`);
+    this.structuralBody.appendChild(dischargeLabel);
+
+    // ---- INSTRUMENTACIÓN SUPERIOR ----
+    const gaugeOutlet = document.createElement('a-entity');
+    gaugeOutlet.setAttribute('position', `${tubeR + 0.16} ${H + 0.05} 0.04`);
+    
+    const gaugeCase2 = document.createElement('a-cylinder');
+    gaugeCase2.setAttribute('radius', 0.022);
+    gaugeCase2.setAttribute('height', 0.01);
+    gaugeCase2.setAttribute('rotation', '90 0 0');
+    gaugeCase2.setAttribute('material', 'color:#eceff1; metalness:0.7; roughness:0.2');
+    gaugeOutlet.appendChild(gaugeCase2);
+
+    const textOutlet = document.createElement('a-text');
+    textOutlet.setAttribute('id', 'press-outlet-text');
+    textOutlet.setAttribute('value', 'PI-02: -- PSI');
+    textOutlet.setAttribute('color', '#1c1e21');
+    textOutlet.setAttribute('align', 'center');
+    textOutlet.setAttribute('width', 0.28);
+    textOutlet.setAttribute('position', '0 0 0.006');
+    textOutlet.setAttribute('font', 'mozillavr');
+    gaugeOutlet.appendChild(textOutlet);
+    this.structuralBody.appendChild(gaugeOutlet);
+
+    // ---- ROTOR ROTATIVO ----
+    this.casing = document.createElement('a-cylinder');
+    this.casing.setAttribute('radius', casingR);
+    this.casing.setAttribute('height', H * 2);
+    this.casing.setAttribute('open-ended', 'true');
+    this.casing.setAttribute('material', 'color:#ffffff; opacity:0.15; shader:standard; metalness:0.8; roughness:0.2; side:double; transparent:true; depthWrite:false');
+    this.structuralBody.appendChild(this.casing);
+
+    this.tube = document.createElement('a-cylinder');
+    this.tube.setAttribute('radius', tubeR);
+    this.tube.setAttribute('height', H * 1.95);
+    this.tube.setAttribute('open-ended', 'true');
+    this.tube.setAttribute('material', 'color:#e8f2f2; opacity:0.10; shader:flat; side:double; transparent:true; depthWrite:false');
+    this.structuralBody.appendChild(this.tube);
+
+    this.axis = document.createElement('a-cylinder');
+    this.axis.setAttribute('radius', 0.006);
+    this.axis.setAttribute('height', H * 2 + 0.28);
+    this.axis.setAttribute('position', '0 0.08 0');
+    this.axis.setAttribute('material', 'color:#ffffff; metalness:1.0; roughness:0.05');
+    this.structuralBody.appendChild(this.axis);
+
+    const heavyCollector = document.createElement('a-cylinder');
+    heavyCollector.setAttribute('radius', casingR + 0.01);
+    heavyCollector.setAttribute('height', 0.04);
+    heavyCollector.setAttribute('position', `0 ${H + 0.02} 0`);
+    heavyCollector.setAttribute('material', 'color:#2a2d32; metalness:0.9; roughness:0.1');
+    this.structuralBody.appendChild(heavyCollector);
+
+    const lightCollector = document.createElement('a-cylinder');
+    lightCollector.setAttribute('radius', tubeR + 0.02);
+    lightCollector.setAttribute('height', 0.03);
+    lightCollector.setAttribute('position', `0 ${H + 0.05} 0`);
+    lightCollector.setAttribute('material', 'color:#3a3f44; metalness:0.9; roughness:0.1');
+    this.structuralBody.appendChild(lightCollector);
+
+    // Motor
+    this.motorGroup = document.createElement('a-entity');
+    this.motorGroup.setAttribute('position', `0 ${H + 0.16} 0`);
+    const motorCasing = document.createElement('a-cylinder');
+    motorCasing.setAttribute('radius', 0.048);
+    motorCasing.setAttribute('height', 0.09);
+    motorCasing.setAttribute('rotation', '0 0 90'); 
+    motorCasing.setAttribute('position', '0.05 0 0');
+    motorCasing.setAttribute('material', 'color:#22252a; metalness:0.8; roughness:0.3');
+    this.motorGroup.appendChild(motorCasing);
+    this.structuralBody.appendChild(this.motorGroup);
+
+    const lightPipeH = document.createElement('a-cylinder');
+    lightPipeH.setAttribute('radius', 0.014);
+    lightPipeH.setAttribute('height', 0.08);
+    lightPipeH.setAttribute('rotation', '0 0 90');
+    lightPipeH.setAttribute('position', `${tubeR + 0.04} ${H + 0.05} 0`);
+    lightPipeH.setAttribute('material', premiumGlass);
+    this.structuralBody.appendChild(lightPipeH);
+
+    const lightPipeV = document.createElement('a-cylinder');
+    lightPipeV.setAttribute('radius', 0.014);
+    lightPipeV.setAttribute('height', 0.28);
+    lightPipeV.setAttribute('position', `${tubeR + 0.08} ${H - 0.07} 0`);
+    lightPipeV.setAttribute('material', premiumGlass);
+    this.structuralBody.appendChild(lightPipeV);
+    
+    this.lightOutflowSource = new THREE.Vector3(tubeR + 0.08, H + 0.05, 0);
+
+    // Torta de sílice compactada — mismo tono ámbar que el resto del ciclo del sólido.
+    // Grosor reducido para que no domine visualmente el centro del tazón.
+    this.cake = document.createElement('a-torus');
+    this.cake.setAttribute('radius', tubeR * 0.95);
+    this.cake.setAttribute('radius-tubular', 0.003);
+    this.cake.setAttribute('rotation', '90 0 0');
+    this.cake.setAttribute('material', 'color:#e4572e; opacity:0.12; shader:flat; transparent:true');
+    this.structuralBody.appendChild(this.cake);
+
+    // ---- GRUPOS DE PARTÍCULAS ----
+    this.spinGroup = document.createElement('a-entity');
+    this.structuralBody.appendChild(this.spinGroup);
+
+    this.outflowGroup = document.createElement('a-entity');
+    this.structuralBody.appendChild(this.outflowGroup);
+
+    this.inflowGroup = document.createElement('a-entity');
+    this.structuralBody.appendChild(this.inflowGroup);
+
+    // Inicializar Sílice
+    for (let i = 0; i < this.numSilica; i++) {
+      const sphere = document.createElement('a-sphere');
+      sphere.setAttribute('radius', 0.0075);
+      sphere.setAttribute('material', 'color:#8B5A2B; shader:flat');
+      this.spinGroup.appendChild(sphere);
+      this.silicaParticles.push(this.makeSilicaParticle(sphere, true));
+    }
+    
+    // Inicializar Agua (permanece cerca del eje/centro, formando el núcleo líquido)
+    for (let i = 0; i < this.numWater; i++) {
+      const sphere = document.createElement('a-sphere');
+      sphere.setAttribute('radius', 0.009);
+      sphere.setAttribute('material', 'color:#00A2E8; shader:flat; opacity:0.95; transparent:true; emissive:#00A2E8; emissiveIntensity:0.45');
+      this.spinGroup.appendChild(sphere);
+      
+      const normalizedH = (Math.random() - 0.5) * H * 1.7; 
+      this.waterParticles.push({
+        el: sphere,
+        rBaseRatio: 0.05 + Math.random() * 0.18, // núcleo central: radio pequeño y estable
+        theta: Math.random() * Math.PI * 2,
+        h: normalizedH,
+        wobblePhase: Math.random() * Math.PI * 2,
+        currentR: 0
+      });
+    }
+
+    for (let i = 0; i < this.numOutflow; i++) {
+      const spL = document.createElement('a-sphere');
+      spL.setAttribute('radius', 0.005);
+      spL.setAttribute('material', 'color:#00A2E8; shader:flat');
+      this.outflowGroup.appendChild(spL);
+      this.lightOutflowParticles.push(this.makeOutflowParticle(spL, true));
+    }
+
+    for (let i = 0; i < this.numInflow; i++) {
+      const sphere = document.createElement('a-sphere');
+      sphere.setAttribute('radius', 0.010); 
+      const feedColor = (i % 2 === 0) ? '#8B5A2B' : '#00A2E8';
+      sphere.setAttribute('material', `color:${feedColor}; shader:flat`);
+      this.inflowGroup.appendChild(sphere);
+      this.inflowParticles.push(this.makeInflowParticle(sphere, true, feedColor));
+    }
+
+    this.el.appendChild(this.structuralBody);
+    this._baseTubeR = tubeR;
+    
+    this.radarCanvas = document.getElementById('radar-canvas');
+    if (this.radarCanvas) {
+      this.radarCtx = this.radarCanvas.getContext('2d');
+    }
+  },
+
+  makeSilicaParticle: function (el, randomizePhase) {
+    return {
+      el,
+      // Arranca muy cerca del eje central, junto con el agua, y luego migra hacia la pared
+      r0Ratio: 0.03 + Math.random() * 0.12, 
+      theta: Math.random() * Math.PI * 2,
+      h: (Math.random() - 0.5) * this.tubeHalfHeight * 1.7,
+      elapsed: randomizePhase ? Math.random() * 1.5 : 0,
+      settled: false,
+      dischargeY: null,
+      dischargeX: null,
+      dischargeZ: null,
+      isExitingHorizontal: false,
+      currentR: 0 
+    };
+  },
+
+  makeOutflowParticle: function(el, randomize) {
+    const source = this.lightOutflowSource;
+    return {
+      el,
+      x0: source.x,
+      y0: source.y,
+      z0: source.z,
+      vy: -0.25 - Math.random() * 0.15, 
+      age: randomize ? Math.random() * 1.1 : 0,
+      maxAge: 1.0,
+      seed: Math.random() * 100
+    };
+  },
+
+  makeInflowParticle: function(el, randomize, color) {
+    // A mayor caudal, la alimentación viaja más rápido hacia el tazón (variable real de control)
+    const flowSpeed = 0.5 + (SIM.caudal / 150) * 0.65;
+    return {
+      el,
+      color: color || '#00A2E8',
+      x: this.inflowSourceX + (Math.random() - 0.5) * 0.008, 
+      y0: this.inflowSourceY,
+      z: (Math.random() - 0.5) * 0.008,
+      vy: (0.28 + Math.random() * 0.08) * flowSpeed, 
+      age: randomize ? Math.random() * 1.2 : 0,
+      maxAge: 1.2
+    };
+  },
+
+  startDischargeCycle: function() {
+    // Se puede disparar automáticamente (balance de masa, ver tick()) o
+    // manualmente desde el botón "Descarga Anticipada" en el HUD.
+    if (SIM.discharging || SIM.paused) return; 
+    SIM.discharging = true;
+    this.fillingTime = 0; 
+    
+    this.silicaParticles.forEach(p => {
+      if (p.settled) {
+        p.dischargeY = p.h;
+        p.dischargeX = this._baseTubeR * Math.cos(p.theta);
+        p.dischargeZ = this._baseTubeR * Math.sin(p.theta);
+        p.isExitingHorizontal = false;
+      }
+    });
+
+    // Resalta el ducto físico por donde efectivamente sale la sílice
+    if (this.dischargePipeH) {
+      this.dischargePipeH.setAttribute('material', this.dischargeGlassActive);
+    }
+    
+    const tag = document.getElementById('status-tag');
+    if(tag) {
+      tag.textContent = "DESCARGA";
+      tag.style.color = "#e4572e";
+    }
+  },
+
+  resetParticles: function () {
+    this.settledCount = 0;
+    SIM.discharging = false;
+    this.fillingTime = 0;
+    SIM.solidsAccumM3 = 0; // se vacía la torta -> el balance de masa arranca de cero
+    this.cake.setAttribute('material', 'opacity', 0.05);
+    if (this.dischargePipeH) {
+      this.dischargePipeH.setAttribute('material', this.dischargeGlassIdle);
+    }
+    this.silicaParticles.forEach(p => {
+      Object.assign(p, this.makeSilicaParticle(p.el, false));
+      p.el.setAttribute('material', 'color', '#8B5A2B');
+      p.el.setAttribute('geometry', 'radius', 0.0075);
+    });
+    this.lightOutflowParticles.forEach(p => Object.assign(p, this.makeOutflowParticle(p.el, false)));
+    this.inflowParticles.forEach(p => Object.assign(p, this.makeInflowParticle(p.el, false, p.color)));
+    
+    const tag = document.getElementById('status-tag');
+    if(tag) {
+      tag.textContent = SIM.paused ? 'PAUSADO' : 'OPERANDO';
+      tag.style.color = "";
+    }
+  },
+
+  drawRadar: function() {
+    if (!this.radarCtx || !this.radarCanvas) return;
+    const ctx = this.radarCtx;
+    const W = this.radarCanvas.width;
+    const H = this.radarCanvas.height;
+    const cx = W / 2;
+    const cy = H / 2;
+    const maxR = cx - 10; 
+
+    ctx.clearRect(0, 0, W, H);
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, maxR, 0, Math.PI * 2);
+    ctx.fillStyle = '#111215';
+    ctx.fill();
+    ctx.strokeStyle = '#33363b';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(94, 200, 194, 0.12)';
+    ctx.lineWidth = 0.5;
+    [0.35, 0.70, 0.95].forEach(factor => {
+      ctx.beginPath();
+      ctx.arc(cx, cy, maxR * factor, 0, Math.PI * 2);
+      ctx.stroke();
+    });
+
+    // Ángulo de giro global del rotor: se suma a la posición local de cada partícula
+    // para que TODO lo que está dentro del tazón (incluida la torta ya asentada en
+    // la pared) se vea girar en el radar, tal como gira físicamente el rotor.
+    const spinAngle = this.spinGroup.object3D.rotation.y;
+
+    this.silicaParticles.forEach(p => {
+      if (SIM.discharging && !p.settled) return;
+      if (p.el.object3D.position.y < -this.tubeHalfHeight) return;
+
+      let radialNorm = p.settled ? 0.94 : (p.currentR / this._baseTubeR);
+      if(isNaN(radialNorm) || radialNorm < 0.02) radialNorm = 0.05;
+
+      const angle = p.theta + spinAngle;
+      const drawR = maxR * radialNorm;
+      const px = cx + drawR * Math.cos(angle);
+      const py = cy + drawR * Math.sin(angle);
+
+      ctx.beginPath();
+      ctx.arc(px, py, p.settled ? 3.5 : 2.5, 0, Math.PI * 2);
+      // Migrando = marrón (sílice en tránsito); asentado en pared = ámbar (torta), igual que la leyenda
+      ctx.fillStyle = p.settled ? '#e4572e' : '#8B5A2B';
+      ctx.fill();
+    });
+
+    this.waterParticles.forEach(w => {
+      if (w.el.object3D.position.y < -this.tubeHalfHeight) return;
+      
+      const radialNorm = (w.currentR / this._baseTubeR);
+      const angle = w.theta + spinAngle;
+      const drawR = maxR * (isNaN(radialNorm) ? 0.15 : radialNorm);
+      const px = cx + drawR * Math.cos(angle);
+      const py = cy + drawR * Math.sin(angle);
+
+      ctx.beginPath();
+      ctx.arc(px, py, 2.2, 0, Math.PI * 2);
+      ctx.fillStyle = '#00A2E8';
+      ctx.fill();
+    });
+  },
+
+  tick: function (time, delta) {
+    if (SIM.paused) {
+      this.drawRadar();
+      return; 
+    }
+
+    const dt = Math.min(delta / 1000, 0.05);
+    const p = computePhysics();
+
+    const scaleFactor = SIM.rDrumM / 0.15;
+    // Escalado uniforme: la longitud del tambor crece junto con el radio,
+    // conservando la relación L/D real (antes solo se escalaba el radio,
+    // dejando la longitud fija y rompiendo la proporción tubular).
+    this.structuralBody.object3D.scale.set(scaleFactor, scaleFactor, scaleFactor);
+    
+    const tR = this._baseTubeR; 
+    const H = this.tubeHalfHeight;
+
+    if (!SIM.discharging) {
+      this.spinGroup.object3D.rotation.y += p.omegaVisual * dt;
+    }
+
+    let activeDischargingParticles = 0;
+
+    this.silicaParticles.forEach(part => {
+      if (SIM.discharging) {
+        if (part.settled) {
+          activeDischargingParticles++;
+
+          if (!part._dischargeStyled) {
+            // Color ámbar consistente con la torta y con la leyenda del panel
+            part.el.setAttribute('material', 'color:#e4572e; shader:flat; emissive:#e4572e; emissiveIntensity:0.6');
+            part.el.setAttribute('geometry', 'radius', 0.011);
+            part._dischargeStyled = true;
+          }
+
+          if (!part.isExitingHorizontal) {
+            part.dischargeY -= 0.18 * dt;
+            part.dischargeX += (0.00 - part.dischargeX) * 8.0 * dt;
+            part.dischargeZ += (0.00 - part.dischargeZ) * 8.0 * dt;
+            part.el.object3D.position.set(part.dischargeX, part.dischargeY, part.dischargeZ);
+
+            if (part.dischargeY <= -H - 0.02) {
+              part.isExitingHorizontal = true;
+              part.dischargeY = -H - 0.02; 
+              part.dischargeX = 0.01; 
+              part.dischargeZ = 0.00;
+            }
+          } else {
+            // Recorrido horizontal hacia el costado inferior derecho, exactamente dentro
+            // del ducto físico "SALIDA SÍLICE" (que vive en el plano z=0)
+            part.dischargeX += 0.15 * dt;
+            part.el.object3D.position.set(part.dischargeX, part.dischargeY, 0);
+
+            if (part.dischargeX >= this.dischargeLimitX) {
+              part.settled = false; 
+              part._dischargeStyled = false;
+              Object.assign(part, this.makeSilicaParticle(part.el, false));
+              part.el.setAttribute('material', 'color:#8B5A2B; shader:flat');
+              part.el.setAttribute('geometry', 'radius', 0.0075);
+            }
+          }
+        } else {
+          part.el.object3D.position.set(0, -999, 0);
+        }
+      } else {
+        if (this.fillingTime < 2.0) {
+          const appearanceDelay = (part.h + H) / (2 * H) * 1.8;
+          if (this.fillingTime < appearanceDelay) {
+            part.el.object3D.position.set(0, -999, 0); 
+            return;
+          }
+        }
+
+        if (part.settled) {
+          part.currentR = tR;
+          const x = tR * Math.cos(part.theta);
+          const z = tR * Math.sin(part.theta);
+          part.el.object3D.position.set(x, part.h, z);
+        } else {
+          part.elapsed += dt;
+          let r = part.r0Ratio * tR * Math.exp(p.kVisual * part.elapsed);
+          part.currentR = r; 
+          
+          if (r >= tR) {
+            r = tR;
+            part.settled = true; 
+            this.settledCount++;
+            // Color ámbar: mismo tono que la torta y la leyenda "Torta de Sílice Naranja"
+            part.el.setAttribute('material', 'color', '#e4572e'); 
+            part.el.setAttribute('geometry', 'radius', 0.0045); 
+          }
+          
+          const x = r * Math.cos(part.theta);
+          const z = r * Math.sin(part.theta);
+          part.el.object3D.position.set(x, part.h, z);
+        }
+      }
+    });
+
+    // --- VELOCIDAD INSTANTÁNEA DE MIGRACIÓN (Ec. 14.4-8, ley de Stokes centrífuga) ---
+    // v(r) = kReal * r, evaluada en el radio REAL actual de una partícula que
+    // esté migrando en este instante (no fija en r=R). Se elige la primera
+    // partícula visible que aún no se haya asentado en la pared; si ninguna
+    // está migrando (todas asentadas, o en pleno ciclo de descarga), se marca
+    // como no disponible (NaN -> el HUD muestra "—").
+    if (SIM.discharging) {
+      SIM.monitoredVInstantMs = NaN;
+    } else {
+      let monitored = null;
+      for (let i = 0; i < this.silicaParticles.length; i++) {
+        const sp = this.silicaParticles[i];
+        if (!sp.settled && sp.el.object3D.position.y > -900) { monitored = sp; break; }
+      }
+      if (monitored) {
+        // Convierte el radio visual/normalizado (currentR, en unidades locales
+        // del tubo) al radio REAL en metros, usando la proporción entre el
+        // radio real del tazón (SIM.rDrumM) y el radio visual del tubo (tR).
+        const rActualM = monitored.currentR * (SIM.rDrumM / tR);
+        SIM.monitoredVInstantMs = p.kReal * rActualM;
+      } else {
+        SIM.monitoredVInstantMs = NaN;
+      }
+    }
+
+    if (SIM.discharging) {
+      if (activeDischargingParticles === 0) {
+        this.resetParticles(); 
+      }
+    } else {
+      this.fillingTime += dt; 
+
+      // --- BALANCE DE MASA DE SÓLIDOS: acumula el volumen de sólidos que ha
+      // entrado (Q_solidos * dt) usando el mismo factor de aceleración visual
+      // que el resto de la animación, y dispara la descarga automáticamente
+      // al alcanzar V_torta,max — igual que en una centrífuga tubular real,
+      // donde la torta se descarga cuando llena su capacidad.
+      SIM.solidsAccumM3 += p.QSolidosM3s * dt * p.visualTimeAccel;
+      const currentFillFraction = p.VTortaMaxM3 > 0
+        ? Math.min(1, SIM.solidsAccumM3 / p.VTortaMaxM3)
+        : 0;
+
+      if (this.cake) {
+        const cakeOpacity = Math.min(0.45, 0.05 + currentFillFraction * 0.40);
+        this.cake.setAttribute('material', 'opacity', cakeOpacity);
+      }
+
+      if (currentFillFraction >= 1) {
+        this.startDischargeCycle(); // disparo automático por capacidad de torta llena
+      }
+    }
+
+    this.waterParticles.forEach(w => {
+      if (SIM.discharging) {
+        w.el.object3D.position.set(0, -999, 0);
+        return;
+      }
+      
+      const appearanceDelay = (w.h + H) / (2 * H) * 1.2;
+      if (this.fillingTime < appearanceDelay) {
+        w.el.object3D.position.set(0, -999, 0);
+        return;
+      }
+
+      // Rotación continua alrededor del eje central, con leve pulso radial
+      // para que se note el movimiento circulatorio sin que el agua migre hacia la pared.
+      w.theta += p.omegaVisual * dt * 0.65;
+      const wobble = 1 + 0.12 * Math.sin(time * 0.003 + w.wobblePhase);
+      w.currentR = w.rBaseRatio * tR * wobble; 
+      
+      const x = w.currentR * Math.cos(w.theta);
+      const z = w.currentR * Math.sin(w.theta);
+      w.el.object3D.position.set(x, w.h, z);
+    });
+
+    this.drawRadar();
+
+    this.lightOutflowParticles.forEach(outP => {
+      if (SIM.discharging || this.fillingTime < 1.8) {
+        outP.el.object3D.position.set(0, -999, 0);
+        return;
+      }
+      outP.age += dt;
+      if (outP.age >= outP.maxAge) {
+        Object.assign(outP, this.makeOutflowParticle(outP.el, false));
+      } else {
+        const sprayFactor = Math.max(0, 1.0 - outP.age * 3.5); 
+        const noiseX = Math.sin(time * 0.05 + outP.seed) * 0.007 * sprayFactor;
+        const noiseZ = Math.cos(time * 0.04 + outP.seed) * 0.007 * sprayFactor;
+
+        outP.el.object3D.position.x = outP.x0 + noiseX;
+        outP.el.object3D.position.y = outP.y0 + outP.vy * outP.age;
+        outP.el.object3D.position.z = outP.z0 + noiseZ;
+      }
+    });
+
+    this.inflowParticles.forEach(inP => {
+      if (SIM.discharging) {
+        inP.el.object3D.position.set(0, -999, 0);
+        return;
+      }
+      inP.age += dt;
+      const currentY = inP.y0 + inP.vy * inP.age;
+      if (currentY >= -this.tubeHalfHeight || inP.age >= inP.maxAge) {
+        Object.assign(inP, this.makeInflowParticle(inP.el, false, inP.color));
+      } else {
+        inP.el.object3D.position.set(inP.x, currentY, inP.z);
+      }
+    });
+
+    if (!this._lastUI || time - this._lastUI > 200) {
+      this._lastUI = time;
+      updateReadouts();
+    }
+  }
+});
+</script>
+
+<style>
+  :root{
+    --steel-dark:#1c1e21;
+    --steel-mid:#33363b;
+    --steel-light:#9aa0a6;
+    --hazard-yellow:#f2c14e;
+    --hazard-red:#e4572e;
+    --clean-blue:#2d7dd2;
+    --readout-teal:#5ec8c2;
+    --panel-bg: rgba(24,26,29,0.96);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;font-family:'IBM Plex Mono',monospace;background:transparent;}
+  a-scene{width:100%;height:100%;}
+  #hud{ position:fixed; inset:0; pointer-events:none; z-index:20; }
+
+  #top-bar{ position:absolute; top:0; left:0; right:0; padding:6px 8px; pointer-events:none;
+    display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
+  #top-bar .brand{ font-family:'Oswald',sans-serif; font-weight:700; font-size:9.5px; letter-spacing:0.8px;
+    color:var(--hazard-yellow); background:rgba(24,26,29,0.85); padding:3px 7px; border-radius:3px;
+    border-left:3px solid var(--hazard-yellow); pointer-events:auto; }
+  #mini-readout{ font-size:9.5px; color:var(--readout-teal); background:rgba(24,26,29,0.85);
+    padding:3px 7px; border-radius:3px; pointer-events:auto; text-align:right; }
+
+  #panel-toggle{ position:absolute; bottom:12px; left:30%; transform:translateX(-50%); pointer-events:auto; cursor:pointer;
+    background:var(--steel-mid); color:#fff; font-family:'Oswald',sans-serif; font-weight:500;
+    font-size:8.5px; letter-spacing:0.5px; text-transform:uppercase; padding:5px 12px; border-radius:14px; border:1px solid var(--steel-light);
+    box-shadow:0 2px 6px rgba(0,0,0,0.5); z-index:25; }
+  
+  #discharge-floating-btn {
+    position: absolute; bottom: 12px; right: 8%; pointer-events: auto; cursor: pointer;
+    font-family: 'Oswald', sans-serif; font-weight: 700; font-size: 8px; letter-spacing: 0.5px;
+    text-transform: uppercase; color: #fff; background: var(--hazard-red);
+    padding: 6px 12px; border-radius: 14px; border: none; border-left: 2px solid var(--hazard-yellow);
+    box-shadow: 0 3px 8px rgba(0,0,0,0.5); z-index: 30; transition: background 0.1s, transform 0.05s;
+  }
+  #discharge-floating-btn:active { background: #b83d1d; transform: scale(0.96); }
+
+  #panel {
+    position:absolute; left:50%; bottom:0; transform:translate(-50%, 100%);
+    width:min(94vw, 345px);
+    background:var(--panel-bg); border:1px solid var(--steel-mid); border-bottom:none;
+    border-radius:12px 12px 0 0;
+    padding:12px 14px 62px; pointer-events:auto; color:#e9e9e9;
+    max-height:75vh; overflow-y:auto;
+    transition:transform 0.22s ease;
+    box-shadow:0 -5px 20px rgba(0,0,0,0.6);
+  }
+  #panel.open{ transform:translate(-50%, 0); }
+  #panel h1{ font-family:'Oswald',sans-serif; font-weight:700; font-size:11px; letter-spacing:1px; text-transform:uppercase;
+    margin:0 0 8px; color:var(--hazard-yellow); display:flex; align-items:center; gap:6px; }
+
+  .row{display:flex; align-items:center; gap:6px; margin-bottom:6px;}
+  .row label{ font-size:8.5px; width:82px; flex-shrink:0; text-transform:uppercase; color:var(--steel-light); }
+  .row input[type=range]{ flex:1; accent-color: var(--readout-teal); height:3px; }
+  .row .val{ width:58px; text-align:right; font-size:9px; color:var(--readout-teal); font-weight:600; }
+
+  #readouts{ display:grid; grid-template-columns:1fr 1fr; gap:4px 8px; margin:6px 0; padding:6px 8px;
+    background:var(--steel-dark); border:1px solid var(--steel-mid); border-radius:4px; }
+  #readouts div{font-size:8px; color:var(--steel-light);}
+  #readouts span{color:var(--readout-teal); font-weight:600;}
+  #readouts .g-val{color:var(--hazard-yellow); font-size:10px;}
+  #vmax-secondary{ font-size:6.5px; color:var(--steel-light); opacity:0.7; text-align:right; margin:-3px 2px 6px; }
+  #vmax-secondary span{ color:var(--steel-light); font-weight:600; }
+
+  #density-table{ position:absolute; top:52px; left:8px; width:150px;
+    margin:0; padding:6px 8px; background:rgba(17,18,21,0.85); border:1px solid var(--steel-mid); border-radius:8px;
+    pointer-events:auto; z-index:21; box-shadow:0 3px 10px rgba(0,0,0,0.5); }
+  #density-title{ font-size:7.5px; text-transform:uppercase; letter-spacing:0.5px; color:var(--hazard-yellow); font-weight:600; margin-bottom:4px; }
+  #density-table table{ width:100%; border-collapse:collapse; }
+  #density-table td{ font-size:8px; color:var(--steel-light); padding:1.5px 0; }
+  #density-table td:last-child{ text-align:right; color:var(--readout-teal); font-weight:600; }
+
+  #discharge-floating-btn.is-locked{ opacity:0.4; pointer-events:none; }
+
+  #radar-container {
+    position:absolute; top:52px; right:8px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(17,18,21,0.75); border: 1px solid var(--steel-mid); border-radius: 10px;
+    padding: 6px; pointer-events:none; z-index:21;
+    box-shadow:0 3px 10px rgba(0,0,0,0.5);
+  }
+  #radar-title { font-size: 7px; color: var(--hazard-yellow); text-transform: uppercase; letter-spacing: 0.5px;
+    margin-bottom: 3px; font-weight: 600; text-align: center; width: 100%; }
+  #radar-canvas { background: #111215; width: 128px; height: 128px; border-radius: 50%; display:block; }
+
+  #controls-bottom{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin:6px 0; }
+
+  #mass-balance{ position:absolute; top:132px; left:8px; width:150px;
+    margin:0; padding:5px 7px; background:rgba(17,18,21,0.55); border:1px solid rgba(228,87,46,0.35);
+    border-radius:8px; pointer-events:none; z-index:21; backdrop-filter:blur(1px); }
+  #mass-balance-title{ font-size:6.5px; text-transform:uppercase; letter-spacing:0.4px; color:var(--hazard-red); font-weight:600; margin-bottom:3px; opacity:0.9; }
+  .mb-row{ display:flex; justify-content:space-between; font-size:7px; color:var(--steel-light); padding:1px 0; }
+  .mb-row span:last-child{ color:var(--readout-teal); font-weight:600; }
+  #fill-bar-track{ margin-top:4px; width:100%; height:5px; background:rgba(17,18,21,0.6); border:1px solid var(--steel-mid); border-radius:3px; overflow:hidden; }
+  #fill-bar-inner{ height:100%; width:0%; background:linear-gradient(90deg, var(--hazard-yellow), var(--hazard-red)); transition:width 0.2s linear; }
+  #fill-bar-label{ font-size:6.5px; color:var(--steel-light); text-align:right; margin-top:2px; opacity:0.9; }
+  #fill-bar-label span{ color:var(--hazard-red); font-weight:700; }
+  #pause-btn{ pointer-events:auto; width:34px; height:34px; border-radius:50%;
+    background:repeating-conic-gradient(var(--hazard-yellow) 0deg 20deg, var(--steel-dark) 20deg 40deg);
+    border:2px solid var(--steel-dark); display:flex; align-items:center; justify-content:center; cursor:pointer; }
+  #pause-btn .core{ width:22px; height:22px; border-radius:50%; background:var(--hazard-red);
+    display:flex; align-items:center; justify-content:center; color:#fff; font-family:'Oswald',sans-serif; font-weight:700; font-size:6px; }
+  #pause-btn.is-paused .core{ background:#3a8f4c; }
+  
+  #reset-btn{ pointer-events:auto; font-family:'Oswald',sans-serif; font-weight:700; font-size:9px; color:#e9e9e9; background:var(--steel-mid); border:1px solid var(--steel-light); flex: 1; height:30px; display:flex; align-items:center; justify-content:center; border-radius:4px; cursor:pointer; text-transform: uppercase;}
+  #status-tag{ font-size:7.5px; text-transform:uppercase; padding:4px 5px; border-radius:3px; background:var(--steel-mid); color:var(--steel-light); width:80px; text-align:center; }
+  #status-tag.running{ color:#3a8f4c; }
+
+  #legend { display: grid; grid-template-columns: 1fr; gap: 4px; margin-top: 8px; font-size: 8px; color: var(--steel-light); border-top: 1px solid var(--steel-mid); padding-top: 6px; }
+  #legend .item { display: flex; align-items: center; }
+  #legend span.dot{ display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<a-scene embedded arjs="sourceType: webcam; debugUIEnabled: false; detectionMode: mono_and_matrix;" vr-mode-ui="enabled: false" loading-screen="enabled: false" renderer="antialias:true; alpha:true; colorManagement:true;">
+  <a-marker preset="hiro" id="hiro-marker">
+    <a-entity id="centrifuge-root" centrifuge-sim position="0 0.1 0" rotation="-90 0 0" scale="2.2 2.2 2.2"></a-entity>
+  </a-marker>
+  <a-entity camera></a-entity>
+</a-scene>
+
+<div id="hud">
+  <div id="top-bar">
+    <div class="brand">AR · CENTRÍFUGA INDUSTRIAL COHESIÓN DE FASES</div>
+    <div id="mini-readout">G = <span id="mini-g">—</span></div>
+  </div>
+
+  <div id="density-table">
+    <div id="density-title">Propiedades de Fases</div>
+    <table>
+      <tr><td>ρ agua</td><td id="rho-agua-val">989 kg/m³</td></tr>
+      <tr><td>ρ sílice</td><td id="rho-silice-val">2650 kg/m³</td></tr>
+      <tr><td>Δρ (S−L)</td><td id="rho-delta-val">1661 kg/m³</td></tr>
+      <tr><td>Caudal</td><td id="caudal-table-val">150 L/min</td></tr>
+    </table>
+  </div>
+
+  <div id="mass-balance">
+    <div id="mass-balance-title">Balance de Sólidos (Auto)</div>
+    <div class="mb-row"><span>V torta máx</span><span id="vtorta-val">—</span></div>
+    <div class="mb-row"><span>Q sólidos</span><span id="qsolidos-val">—</span></div>
+    <div class="mb-row"><span>t descarga</span><span id="tdescarga-val">—</span></div>
+    <div id="fill-bar-track">
+      <div id="fill-bar-inner"></div>
+    </div>
+    <div id="fill-bar-label">Torta: <span id="fill-pct-val">0%</span></div>
+  </div>
+
+  <div id="radar-container">
+    <div id="radar-title">Distribución radial (cenital)</div>
+    <canvas id="radar-canvas" width="240" height="240"></canvas>
+  </div>
+
+  <button id="panel-toggle">Ajustes</button>
+  <button id="discharge-floating-btn">⚡ Anticipada</button>
+
+  <div id="panel">
+    <h1>Configuración de Proceso</h1>
+
+    <div class="row">
+      <label for="rpm">Velocidad (RPM)</label>
+      <input type="range" id="rpm" min="500" max="8000" step="50" value="2000">
+      <div class="val" id="rpm-val">2000</div>
+    </div>
+    <div class="row">
+      <label for="radio">Radio Centrífuga</label>
+      <input type="range" id="radio" min="5" max="30" step="1" value="15">
+      <div class="val" id="radio-val">15 cm</div>
+    </div>
+    <div class="row">
+      <label for="drho">Δρ (S-L)</label>
+      <input type="range" id="drho" min="1400" max="1900" step="10" value="1661">
+      <div class="val" id="drho-val">1661</div>
+    </div>
+    <div class="row">
+      <label for="caudal">Caudal</label>
+      <input type="range" id="caudal" min="20" max="500" step="5" value="150">
+      <div class="val" id="caudal-val">150 L/min</div>
+    </div>
+    <div class="row">
+      <label for="phiemp">φ empaque (%)</label>
+      <input type="range" id="phiemp" min="50" max="70" step="1" value="60">
+      <div class="val" id="phiemp-val">60 %</div>
+    </div>
+
+    <div id="readouts">
+      <div>ω: <span id="omega-val">—</span> rad/s</div>
+      <div>Fuerza G: <span class="g-val" id="g-val">—</span></div>
+      <div>τ residencia (V/Q): <span id="time-res-val">—</span></div>
+      <div>t sedimentación: <span id="time-sed-val">—</span></div>
+      <div style="grid-column:1/-1;">v migración (r actual): <span id="vmig-actual-val">—</span></div>
+      <div style="grid-column:1/-1;">Estado: <span id="separation-status">—</span></div>
+    </div>
+    <div id="vmax-secondary">v máx (r=R, diseño): <span id="vmax-diseno-val">—</span></div>
+
+    <div id="controls-bottom">
+      <div id="pause-btn"><div class="core">||</div></div>
+      <button id="reset-btn">Reiniciar Ciclo</button>
+      <div id="status-tag" class="running">OPERANDO</div>
+    </div>
+
+    <div id="legend">
+      <div class="item"><span class="dot" style="background:rgba(94, 200, 240, 0.9)"></span>Fase Líquida Clara (Agua de Baja Densidad en Núcleo Central)</div>
+      <div class="item"><span class="dot" style="background:#8B5A2B"></span>Fase Sólida Marrón (Sílice en Proceso de Migración Dinámica)</div>
+      <div class="item"><span class="dot" style="background:#e4572e"></span>Torta de Sílice Naranja (Masa Compactada en Pared del Rotor)</div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.getElementById('rpm').addEventListener('input', e => {
+  SIM.rpm = parseFloat(e.target.value);
+  document.getElementById('rpm-val').textContent = SIM.rpm;
+  updateReadouts();
+});
+document.getElementById('radio').addEventListener('input', e => {
+  SIM.rDrumM = parseFloat(e.target.value) / 100;
+  document.getElementById('radio-val').textContent = e.target.value + " cm";
+  updateReadouts();
+});
+document.getElementById('drho').addEventListener('input', e => {
+  SIM.deltaRho = parseFloat(e.target.value);
+  document.getElementById('drho-val').textContent = SIM.deltaRho;
+  updateReadouts();
+});
+document.getElementById('caudal').addEventListener('input', e => {
+  SIM.caudal = parseFloat(e.target.value);
+  document.getElementById('caudal-val').textContent = SIM.caudal + " L/min";
+  updateReadouts();
+});
+// Cv (concentración de sólidos) se mantiene fijo internamente (SIM.cv, definido
+// arriba) para los cálculos del balance de masa, pero ya no se expone como
+// control en el panel de ajustes.
+document.getElementById('phiemp').addEventListener('input', e => {
+  SIM.phiEmpaque = parseFloat(e.target.value) / 100;
+  document.getElementById('phiemp-val').textContent = e.target.value + " %";
+  updateReadouts();
+});
+
+const panel = document.getElementById('panel');
+const panelToggle = document.getElementById('panel-toggle');
+panelToggle.addEventListener('click', () => {
+  const isOpen = panel.classList.toggle('open');
+  panelToggle.textContent = isOpen ? 'Ocultar' : 'Ajustes';
+});
+
+const pauseBtn = document.getElementById('pause-btn');
+const statusTag = document.getElementById('status-tag');
+const dischargeBtn = document.getElementById('discharge-floating-btn');
+pauseBtn.addEventListener('click', () => {
+  SIM.paused = !SIM.paused;
+  pauseBtn.classList.toggle('is-paused', SIM.paused);
+  pauseBtn.querySelector('.core').textContent = SIM.paused ? '▶' : '||';
+  if(!SIM.discharging) {
+    statusTag.textContent = SIM.paused ? 'PAUSADO' : 'OPERANDO';
+  }
+  statusTag.classList.toggle('running', !SIM.paused && !SIM.discharging);
+  // Bloquea el botón de iniciar descarga mientras está en pausa: nada nuevo puede
+  // arrancar, y lo que ya estaba en curso queda congelado en su posición exacta.
+  dischargeBtn.classList.toggle('is-locked', SIM.paused);
+});
+
+document.getElementById('discharge-floating-btn').addEventListener('click', () => {
+  const comp = document.getElementById('centrifuge-root').components['centrifuge-sim'];
+  if (comp && !SIM.paused) {
+    comp.startDischargeCycle();
+  }
+});
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+  const comp = document.getElementById('centrifuge-root').components['centrifuge-sim'];
+  if (comp) comp.resetParticles();
+});
+
+updateReadouts();
+</script>
+</body>
+</html>
